@@ -9,14 +9,17 @@
   bool displayActive = false;
 #endif
 
+// Hard-coded password for web input
+const char* WEB_PASSWORD = "password"; // The password for accessing the message input
+
 // Trusted MACs are now used for both receive and send authorization
 // For simplicity, we are assuming all ESP32s in your network will be peers.
 // Replace these with the actual MAC addresses of all your ESP32 nodes.
 // Example: {0x14, 0x33, 0x5C, 0x06, 0x3A, 0x99} for 14:33:5C:06:3A:99
 const uint8_t trustedMACs[][6] = {
-  {0x08, 0xA6, 0xF7, 0x47, 0xFA, 0xAD},  // MAC of node A (example, keep if correct for your setup)
-  {0x14, 0x33, 0x5C, 0x6D, 0x74, 0x05},  // <<-- CORRECTED: MAC of node B (was 0x04, now 0x05)
-  {0x14, 0x33, 0x5C, 0x6C, 0x3A, 0x99}   // <<-- CORRECTED: MAC of node C (was 0x06, now 0x6C)
+  {0x08, 0xA6, 0xF7, 0x47, 0xFA, 0xAD},   // MAC of node A (example, keep if correct for your setup)
+  {0x14, 0x33, 0x5C, 0x6D, 0x74, 0x05},   // <<-- CORRECTED: MAC of node B (was 0x04, now 0x05)
+  {0x14, 0x33, 0x5C, 0x6C, 0x3A, 0x99}    // <<-- CORRECTED: MAC of node C (was 0x06, now 0x6C)
   // Add all other ESP32 MAC addresses here, ensuring they are exact!
 };
 const int numTrusted = sizeof(trustedMACs) / sizeof(trustedMACs[0]);
@@ -142,7 +145,7 @@ void setup() {
     memcpy(peer.peer_addr, trustedMACs[i], 6);
     // Peer channel MUST match the SoftAP channel (WIFI_CHANNEL)
     peer.channel = WIFI_CHANNEL;
-    peer.encrypt = false;  // No encryption for simplicity in this example
+    peer.encrypt = false;   // No encryption for simplicity in this example
     esp_err_t result = esp_now_add_peer(&peer);
     if (result == ESP_OK)
       Serial.println("Peer added: " + formatMac(trustedMACs[i]));
@@ -213,13 +216,21 @@ void loop() {
               }
               Serial.println("Received POST Body: " + postBody);
 
-              // Parse the POST body for message parameter
+              // Parse the POST body for message and password parameters
               String messageParam = "";
+              String passwordParam = "";
               int messageStart = postBody.indexOf("message=");
               if (messageStart != -1) {
                 int messageEnd = postBody.indexOf('&', messageStart);
                 if (messageEnd == -1) messageEnd = postBody.length(); // If '&' not found, it's the end
                 messageParam = postBody.substring(messageStart + 8, messageEnd);
+              }
+
+              int passwordStart = postBody.indexOf("password=");
+              if (passwordStart != -1) {
+                int passwordEnd = postBody.indexOf('&', passwordStart);
+                if (passwordEnd == -1) passwordEnd = postBody.length();
+                passwordParam = postBody.substring(passwordStart + 9, passwordEnd);
               }
 
               // --- URL DECODING FOR MESSAGE ---
@@ -236,8 +247,11 @@ void loop() {
                 }
               }
               
-              // --- Validation Logic (simplified: only check for empty message) ---
-              if (decodedMessage.length() == 0) {
+              // --- Password Validation and Message Processing ---
+              if (passwordParam != WEB_PASSWORD) {
+                webFeedbackMessage = "<p class='feedback' style='color:red;'>Incorrect password. Message not sent.</p>";
+                Serial.println("Incorrect password entered.");
+              } else if (decodedMessage.length() == 0) {
                 webFeedbackMessage = "<p class='feedback' style='color:orange;'>Please enter a message.</p>";
               } else {
                 userMessageBuffer = decodedMessage; // Store message for ESP-NOW sending
@@ -269,7 +283,7 @@ void loop() {
             client.println(F("summary{font-size:1.1em;font-weight:bold;cursor:pointer;padding:5px 0;text-align:center;}"));
             client.println(F("form{display:flex;flex-direction:column;align-items:center;margin-top:10px;}"));
             client.println(F("label{font-size:0.9em;margin-bottom:5px;align-self:flex-start;width:80%;}"));
-            client.println(F("input[type=text]{width:80%;max-width:350px;padding:8px;margin-bottom:10px;border-radius:4px;border:1px solid #ccc;font-size:0.9em;}"));
+            client.println(F("input[type=text], input[type=password]{width:80%;max-width:350px;padding:8px;margin-bottom:10px;border-radius:4px;border:1px solid #ccc;font-size:0.9em;}"));
             client.println(F("input[type=submit]{background-color:#007bff;color:white;padding:8px 15px;border:none;border-radius:4px;cursor:pointer;font-size:1em;transition:background-color 0.3s ease;}"));
             client.println(F("input[type=submit]:hover{background-color:#0056b3;}"));
             
@@ -309,6 +323,8 @@ void loop() {
             client.println(F("<form action=\"/\" method=\"POST\">"));
             client.println(F("<label for=\"message_input\">Message:</label>"));
             client.println(F("<input type=\"text\" id=\"message_input\" name=\"message\" placeholder=\"Enter your message here\" required maxlength=\"200\">"));
+            client.println(F("<label for=\"password_input\">Password:</label>")); // Added password label
+            client.println(F("<input type=\"password\" id=\"password_input\" name=\"password\" placeholder=\"Enter password\" required>")); // Added password input field
             // Removed the MAC input field entirely
             client.println(F("<input type=\"submit\" value=\"Send Message\">"));
             client.println(F("</form>"));
@@ -375,9 +391,9 @@ void loop() {
 void displayLastLines(int numLines) {
   tft.fillScreen(TFT_BLACK);
   tft.setCursor(0, 0);
-  tft.setTextColor(TFT_CYAN);    tft.println("MAC: " + MAC); // Full MAC on display
-  tft.setTextColor(TFT_GREEN);  tft.println("IP: " + IP.toString());
-  tft.setTextColor(TFT_WHITE);  tft.println("----------------------");
+  tft.setTextColor(TFT_CYAN);     tft.println("MAC: " + MAC); // Full MAC on display
+  tft.setTextColor(TFT_GREEN);    tft.println("IP: " + IP.toString());
+  tft.setTextColor(TFT_WHITE);    tft.println("----------------------");
 
   // Since serialBuffer has most recent on top, we just print from the beginning
   int linesPrinted = 0;
