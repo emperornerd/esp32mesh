@@ -49,12 +49,15 @@ int counter = 1;
 // --- Message Structure for ESP-NOW and Deduplication ---
 // This struct will be used to send and receive messages,
 // ensuring each message has a unique ID and original sender MAC.
-// Message content size should be 240 bytes (max 250 bytes - 10 for ID/MAC).
+// Message content size should be 240 bytes (max 250 bytes - 10 for ID/MAC/TTL).
 // If you change content size, update MAX_MESSAGE_CONTENT_LEN
-#define MAX_MESSAGE_CONTENT_LEN 240
+#define MAX_MESSAGE_CONTENT_LEN 239 // 250 (max ESP-NOW) - 4 (ID) - 6 (MAC) - 1 (TTL) = 239
+#define MAX_TTL_HOPS 25 // Maximum Time-To-Live (hops) for a message
+
 typedef struct __attribute__((packed)) {
   uint32_t messageID;       // Unique ID for the message
   uint8_t originalSenderMac[6]; // MAC address of the *original* sender
+  uint8_t ttl;              // Time-To-Live (hops remaining)
   char content[MAX_MESSAGE_CONTENT_LEN]; // Message content
 } esp_now_message_t;
 
@@ -176,7 +179,14 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
   // Add to seen messages cache immediately
   addMessageToSeen(incomingMessage.messageID, incomingMessage.originalSenderMac);
 
-  // If not a duplicate, push to queue for processing in loop()
+  // --- TTL Check ---
+  // Only process and potentially re-broadcast if TTL is greater than 0
+  if (incomingMessage.ttl == 0) {
+      // Message has reached its hop limit. Do not queue for processing or re-broadcasting.
+      return; 
+  }
+
+  // If not a duplicate and TTL > 0, push to queue for processing in loop()
   // Use xQueueSendFromISR for ISR context
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
   if (xQueueSendFromISR(messageQueue, &incomingMessage, &xHigherPriorityTaskWoken) != pdPASS) {
@@ -189,7 +199,7 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
 
 
 // Sends a message to all trusted ESP-NOW peers
-void sendToAllPeers(const esp_now_message_t &message) {
+void sendToAllPeers(esp_now_message_t message) { // Pass by value so we can decrement TTL locally
   uint8_t currentMacBytes[6];
   // Convert our own MAC_full_str to bytes for comparison
   sscanf(MAC_full_str.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", 
@@ -197,6 +207,16 @@ void sendToAllPeers(const esp_now_message_t &message) {
          (unsigned int*)&currentMacBytes[2], (unsigned int*)&currentMacBytes[3], 
          (unsigned int*)&currentMacBytes[4], (unsigned int*)&currentMacBytes[5]);
 
+  // --- Decrement TTL before sending ---
+  // This is crucial for re-broadcasted messages.
+  if (message.ttl > 0) {
+      message.ttl--; 
+  } else {
+      // This should ideally not happen if TTL check is done before calling sendToAllPeers
+      // but as a safeguard, if TTL is already 0, don't send.
+      Serial.println("Attempted to re-broadcast message with TTL 0. Skipping.");
+      return;
+  }
 
   for (int i = 0; i < numTrusted; i++) {
     // Prevent sending back to the original sender to avoid loops in the mesh.
@@ -206,8 +226,9 @@ void sendToAllPeers(const esp_now_message_t &message) {
       esp_err_t result = esp_now_send(trustedMACs[i], (uint8_t*)&message, sizeof(esp_now_message_t));
       if (result != ESP_OK)
         Serial.printf("Send to %s failed (err %d)\n", formatMac(trustedMACs[i]).c_str(), result);
-      else
-        Serial.printf("Sent to %s: %s\n", formatMac(trustedMACs[i]).c_str(), message.content);
+      // Removed TTL from this Serial.printf as well
+      // else
+      //   Serial.printf("Sent to %s: %s\n", formatMac(trustedMACs[i]).c_str(), message.content);
     } else {
         // Serial.printf("Skipping send to original sender or self: %s\n", formatMac(trustedMACs[i]).c_str());
     }
@@ -300,7 +321,8 @@ void loop() {
     String incomingContent = String(receivedMessage.content);
     String originalSenderMacSuffix = getMacSuffix(receivedMessage.originalSenderMac); // Use new helper
 
-    String formattedIncoming = String("[") + String(receivedMessage.messageID, HEX) + "] Node " + originalSenderMacSuffix + " - " + incomingContent;
+    // Formatted string WITHOUT messageID or TTL
+    String formattedIncoming = "Node " + originalSenderMacSuffix + " - " + incomingContent;
     
     // Prepend new messages to buffer (most recent on top)
     serialBuffer = formattedIncoming + "\n" + serialBuffer;
@@ -313,7 +335,13 @@ void loop() {
 #endif
 
     // Re-broadcast the message to other peers (mesh behavior)
-    sendToAllPeers(receivedMessage);
+    // Only re-broadcast if TTL is still greater than 0 *before* this node decrements it.
+    // The `sendToAllPeers` function will handle the decrement itself.
+    if (receivedMessage.ttl > 0) { 
+        sendToAllPeers(receivedMessage);
+    } else {
+        Serial.println("Message reached TTL limit, not re-broadcasting.");
+    }
   }
 
 
@@ -327,7 +355,7 @@ void loop() {
       // It's good practice to clear the struct before populating, especially char arrays
       memset(&autoMessage, 0, sizeof(esp_now_message_t)); 
 
-      autoMessage.messageID = esp_random();
+      autoMessage.messageID = esp_random(); // Still generated for deduplication
       uint8_t selfMac[6];
       // Convert our own MAC_full_str to bytes
       sscanf(MAC_full_str.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", 
@@ -335,6 +363,7 @@ void loop() {
              (unsigned int*)&selfMac[2], (unsigned int*)&selfMac[3], 
              (unsigned int*)&selfMac[4], (unsigned int*)&selfMac[5]);
       memcpy(autoMessage.originalSenderMac, selfMac, 6);
+      autoMessage.ttl = MAX_TTL_HOPS; // Initialize TTL for a new message
       
       char msgContentBuf[MAX_MESSAGE_CONTENT_LEN]; // Use a temporary buffer for snprintf
       snprintf(msgContentBuf, sizeof(msgContentBuf), "\"Auto Message %d\"", counter);
@@ -343,7 +372,8 @@ void loop() {
       strncpy(autoMessage.content, msgContentBuf, sizeof(autoMessage.content));
       autoMessage.content[sizeof(autoMessage.content) - 1] = '\0'; // Explicitly ensure null termination
 
-      String formattedMessage = String("[") + String(autoMessage.messageID, HEX) + "] Node " + MAC_suffix_str + " - " + String(autoMessage.content);
+      // Formatted string WITHOUT messageID or TTL
+      String formattedMessage = "Node " + MAC_suffix_str + " - " + String(autoMessage.content);
 
       // Add to seen messages cache immediately (so we don't process our own broadcast as an incoming message)
       addMessageToSeen(autoMessage.messageID, autoMessage.originalSenderMac);
@@ -534,7 +564,7 @@ void loop() {
     // Clear the struct to ensure all bytes are zero, especially the content buffer
     memset(&userEspNowMessage, 0, sizeof(esp_now_message_t)); 
 
-    userEspNowMessage.messageID = esp_random();
+    userEspNowMessage.messageID = esp_random(); // Still generated for deduplication
     uint8_t selfMac[6];
     // Convert our own MAC_full_str to bytes
     sscanf(MAC_full_str.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", 
@@ -542,13 +572,15 @@ void loop() {
            (unsigned int*)&selfMac[2], (unsigned int*)&selfMac[3], 
            (unsigned int*)&selfMac[4], (unsigned int*)&selfMac[5]);
     memcpy(userEspNowMessage.originalSenderMac, selfMac, 6);
+    userEspNowMessage.ttl = MAX_TTL_HOPS; // Initialize TTL for a new message
     
     // Copy content from String to char array, ensuring null termination.
     strncpy(userEspNowMessage.content, userMessageBuffer.c_str(), MAX_MESSAGE_CONTENT_LEN);
     userEspNowMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0'; // Explicitly ensure null termination
 
     // User-sent messages now indicate they are from "User via Node [MAC suffix]"
-    String messageToSendFormatted = String("[") + String(userEspNowMessage.messageID, HEX) + "] User via Node " + MAC_suffix_str + " - " + userMessageBuffer;
+    // Formatted string WITHOUT messageID or TTL
+    String messageToSendFormatted = "User via Node " + MAC_suffix_str + " - " + userMessageBuffer;
 
     // Add to seen messages cache immediately
     addMessageToSeen(userEspNowMessage.messageID, userEspNowMessage.originalSenderMac);
