@@ -1,12 +1,16 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h> // Include for esp_wifi_set_channel
+#include <vector>     // For dynamic array for the cache
+#include <chrono>     // For timestamping cache entries
+#include <algorithm>  // For std::remove_if, std::min_element
+#include <string.h>   // For strncpy and memset
 
 #define USE_DISPLAY true
 #if USE_DISPLAY
-  #include <TFT_eSPI.h>
-  TFT_eSPI tft = TFT_eSPI();
-  bool displayActive = false;
+#include <TFT_eSPI.h>
+TFT_eSPI tft = TFT_eSPI();
+bool displayActive = false;
 #endif
 
 // Hard-coded password for web input
@@ -17,9 +21,9 @@ const char* WEB_PASSWORD = "password"; // The password for accessing the message
 // Replace these with the actual MAC addresses of all your ESP32 nodes.
 // Example: {0x14, 0x33, 0x5C, 0x06, 0x3A, 0x99} for 14:33:5C:06:3A:99
 const uint8_t trustedMACs[][6] = {
-  {0x08, 0xA6, 0xF7, 0x47, 0xFA, 0xAD},   // MAC of node A (example, keep if correct for your setup)
-  {0x14, 0x33, 0x5C, 0x6D, 0x74, 0x05},   // <<-- CORRECTED: MAC of node B (was 0x04, now 0x05)
-  {0x14, 0x33, 0x5C, 0x6C, 0x3A, 0x99}    // <<-- CORRECTED: MAC of node C (was 0x06, now 0x6C)
+  {0x08, 0xA6, 0xF7, 0x47, 0xFA, 0xAD},    // MAC of node A (example, keep if correct for your setup)
+  {0x14, 0x33, 0x5C, 0x6D, 0x74, 0x05},    // MAC of node B
+  {0x14, 0x33, 0x5C, 0x6C, 0x3A, 0x99}     // MAC of node C
   // Add all other ESP32 MAC addresses here, ensuring they are exact!
 };
 const int numTrusted = sizeof(trustedMACs) / sizeof(trustedMACs[0]);
@@ -31,7 +35,10 @@ const int WIFI_CHANNEL = 1;
 
 WiFiServer server(80);
 IPAddress IP;
-String MAC, ssid; // MAC is the full MAC address of this ESP32
+String MAC_full_str; // Full MAC address of this ESP32 (e.g., "AA:BB:CC:DD:EE:FF")
+String MAC_suffix_str; // Last 4 chars of our MAC (e.g., "EEFF")
+String ssid; // Our unique SSID
+
 String serialBuffer = "";       // Stores messages, most recent on top
 String userMessageBuffer = "";  // To hold the user-entered message from POST
 String webFeedbackMessage = ""; // To send messages back to the web client (e.g., success/error)
@@ -39,16 +46,45 @@ String webFeedbackMessage = ""; // To send messages back to the web client (e.g.
 unsigned long lastUpdate = 0;
 int counter = 1;
 
+// --- Message Structure for ESP-NOW and Deduplication ---
+// This struct will be used to send and receive messages,
+// ensuring each message has a unique ID and original sender MAC.
+// Message content size should be 240 bytes (max 250 bytes - 10 for ID/MAC).
+// If you change content size, update MAX_MESSAGE_CONTENT_LEN
+#define MAX_MESSAGE_CONTENT_LEN 240
+typedef struct __attribute__((packed)) {
+  uint32_t messageID;       // Unique ID for the message
+  uint8_t originalSenderMac[6]; // MAC address of the *original* sender
+  char content[MAX_MESSAGE_CONTENT_LEN]; // Message content
+} esp_now_message_t;
+
+// --- Cache for Deduplication ---
+struct SeenMessage {
+  uint32_t messageID;
+  uint8_t originalSenderMac[6];
+  unsigned long timestamp; // When this message was last seen/processed
+};
+
+// Global vector for seen messages and mutex for thread-safe access
+// IMPORTANT: Using a mutex for `seenMessages` as it's accessed from ISR context (`onDataRecv`)
+// and the main loop.
+std::vector<SeenMessage> seenMessages;
+portMUX_TYPE seenMessagesMutex = portMUX_INITIALIZER_UNLOCKED;
+
+const unsigned long DEDUP_CACHE_DURATION_MS = 10000; // How long to keep a message in cache (10 seconds)
+const size_t MAX_CACHE_SIZE = 50; // Max number of messages to keep in cache
+
+// --- FreeRTOS Queue for message processing ---
+QueueHandle_t messageQueue;
+#define QUEUE_SIZE 10 // Max messages to queue
+
 // --- FORWARD DECLARATION for displayLastLines ---
-// This tells the compiler that displayLastLines exists and its signature,
-// even though its full definition comes later.
 #if USE_DISPLAY
 void displayLastLines(int numLines);
 #endif
 // --- END FORWARD DECLARATION ---
 
-
-// Helper function to format a byte array MAC address into a String
+// Helper function to format a byte array MAC address into a String (full MAC)
 String formatMac(const uint8_t *mac) {
   char buf[18];
   snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -56,42 +92,138 @@ String formatMac(const uint8_t *mac) {
   return String(buf);
 }
 
+// Helper function to get the 4-char suffix from a byte array MAC
+String getMacSuffix(const uint8_t *mac) {
+  char buf[5]; // 4 chars + null terminator
+  snprintf(buf, sizeof(buf), "%02X%02X", mac[4], mac[5]); // Last two bytes (4 hex chars)
+  return String(buf);
+}
+
+
+// Function to check if a message is already in the seenMessages cache
+bool isMessageSeen(uint32_t id, const uint8_t* mac) {
+  // Lock the mutex before accessing the shared resource
+  portENTER_CRITICAL(&seenMessagesMutex);
+  bool found = false;
+  for (const auto& msg : seenMessages) {
+    if (msg.messageID == id && memcmp(msg.originalSenderMac, mac, 6) == 0) {
+      found = true;
+      break;
+    }
+  }
+  // Unlock the mutex
+  portEXIT_CRITICAL(&seenMessagesMutex);
+  return found;
+}
+
+// Function to add a message to the seenMessages cache
+void addMessageToSeen(uint32_t id, const uint8_t* mac) {
+  // Lock the mutex before accessing the shared resource
+  portENTER_CRITICAL(&seenMessagesMutex);
+
+  // Remove old entries first
+  unsigned long currentTime = millis();
+  seenMessages.erase(std::remove_if(seenMessages.begin(), seenMessages.end(),
+                                     [currentTime](const SeenMessage& msg) {
+                                         return (currentTime - msg.timestamp) > DEDUP_CACHE_DURATION_MS;
+                                     }),
+                      seenMessages.end());
+
+  // If cache is full, remove the oldest one before adding new
+  if (seenMessages.size() >= MAX_CACHE_SIZE) {
+    // Find the oldest message (smallest timestamp)
+    auto oldest = std::min_element(seenMessages.begin(), seenMessages.end(),
+                                   [](const SeenMessage& a, const SeenMessage& b) {
+                                       return a.timestamp < b.timestamp;
+                                   });
+    if (oldest != seenMessages.end()) {
+        seenMessages.erase(oldest);
+    }
+  }
+
+  SeenMessage newMessage = {id, {0}, currentTime};
+  memcpy(newMessage.originalSenderMac, mac, 6);
+  seenMessages.push_back(newMessage);
+
+  // Unlock the mutex
+  portEXIT_CRITICAL(&seenMessagesMutex);
+}
+
+
 // Callback function when ESP-NOW data is received
-// No MAC filtering here; all received messages will be processed.
+// IMPORTANT: Keep this function as lean as possible!
 void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len) {
-  if (len <= 0 || len > 250) return; // Basic validation of message length
+  // Basic validation of message length
+  if (len != sizeof(esp_now_message_t)) {
+    // Serial.println("Received malformed ESP-NOW message (wrong size)"); // Cannot print from ISR directly
+    return;
+  }
 
-  String incoming;
-  for (int i = 0; i < len; i++) incoming += (char)data[i];
-  incoming.trim(); // Remove leading/trailing whitespace
+  esp_now_message_t incomingMessage;
+  // Use memset to clear the structure before copying to avoid junk data,
+  // especially if the received 'len' is smaller than the struct (though we check 'len').
+  memset(&incomingMessage, 0, sizeof(esp_now_message_t));
+  memcpy(&incomingMessage, data, sizeof(esp_now_message_t));
+  // Ensure null-termination of the content, as memcpy doesn't guarantee it if source isn't null-terminated
+  // or if the source is exactly MAX_MESSAGE_CONTENT_LEN long.
+  incomingMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0';
 
-  // Prepend new messages to buffer (most recent on top)
-  // Simple duplicate prevention based on message content
-  if (serialBuffer.indexOf(incoming) == -1) {
-    serialBuffer = incoming + "\n" + serialBuffer;
-    if (serialBuffer.length() > 4000) // Keep buffer from growing too large
-      serialBuffer = serialBuffer.substring(0, 4000); // Take the most recent 4000 chars
-    Serial.println("Message received: " + incoming);
+  // Check if already seen based on ID and original sender MAC
+  if (isMessageSeen(incomingMessage.messageID, incomingMessage.originalSenderMac)) {
+    return; // Duplicate message, discard.
+  }
+  
+  // Add to seen messages cache immediately
+  addMessageToSeen(incomingMessage.messageID, incomingMessage.originalSenderMac);
 
-#if USE_DISPLAY
-    if (displayActive) displayLastLines(22); // Call after declaration now
-#endif
+  // If not a duplicate, push to queue for processing in loop()
+  // Use xQueueSendFromISR for ISR context
+  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+  if (xQueueSendFromISR(messageQueue, &incomingMessage, &xHigherPriorityTaskWoken) != pdPASS) {
+    // Message dropped due to queue full. Can't print from ISR.
+  }
+  if (xHigherPriorityTaskWoken == pdTRUE) {
+    portYIELD_FROM_ISR(); // Yield to a higher priority task if one was unblocked
   }
 }
 
+
 // Sends a message to all trusted ESP-NOW peers
-void sendToAllPeers(const String &message) {
+void sendToAllPeers(const esp_now_message_t &message) {
+  uint8_t currentMacBytes[6];
+  // Convert our own MAC_full_str to bytes for comparison
+  sscanf(MAC_full_str.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", 
+         (unsigned int*)&currentMacBytes[0], (unsigned int*)&currentMacBytes[1], 
+         (unsigned int*)&currentMacBytes[2], (unsigned int*)&currentMacBytes[3], 
+         (unsigned int*)&currentMacBytes[4], (unsigned int*)&currentMacBytes[5]);
+
+
   for (int i = 0; i < numTrusted; i++) {
-    esp_err_t result = esp_now_send(trustedMACs[i], (uint8_t*)message.c_str(), message.length());
-    if (result != ESP_OK)
-      Serial.printf("Send to %s failed (err %d)\n", formatMac(trustedMACs[i]).c_str(), result);
-    else
-      Serial.printf("Sent to %s: %s\n", formatMac(trustedMACs[i]).c_str(), message.c_str());
+    // Prevent sending back to the original sender to avoid loops in the mesh.
+    // Also, don't send to ourselves if we are the original sender (to avoid sending it back to us,
+    // although our local addMessageToSeen already handles our own messages as "seen").
+    if (memcmp(trustedMACs[i], message.originalSenderMac, 6) != 0 || memcmp(trustedMACs[i], currentMacBytes, 6) != 0) {
+      esp_err_t result = esp_now_send(trustedMACs[i], (uint8_t*)&message, sizeof(esp_now_message_t));
+      if (result != ESP_OK)
+        Serial.printf("Send to %s failed (err %d)\n", formatMac(trustedMACs[i]).c_str(), result);
+      else
+        Serial.printf("Sent to %s: %s\n", formatMac(trustedMACs[i]).c_str(), message.content);
+    } else {
+        // Serial.printf("Skipping send to original sender or self: %s\n", formatMac(trustedMACs[i]).c_str());
+    }
   }
 }
 
 void setup() {
   Serial.begin(115200);
+
+  // Create the FreeRTOS message queue
+  messageQueue = xQueueCreate(QUEUE_SIZE, sizeof(esp_now_message_t));
+  if (messageQueue == NULL) {
+    Serial.println("Failed to create message queue!");
+    // Handle error, maybe halt
+    while(true) { delay(100); } // Halt if queue creation fails
+  }
 
   // Set up WiFi as Access Point + Station (for ESP-NOW and serving web page)
   WiFi.mode(WIFI_AP_STA);
@@ -103,12 +235,14 @@ void setup() {
   // We use the WIFI_CHANNEL constant here from the start.
   WiFi.softAP("placeholder", nullptr, WIFI_CHANNEL);
   delay(100);
-  MAC = WiFi.softAPmacAddress(); // Get our own MAC address
+  MAC_full_str = WiFi.softAPmacAddress(); // Get our own full MAC address
+  
+  // Calculate our MAC suffix once at startup
+  String macCleanForSuffix = MAC_full_str;
+  macCleanForSuffix.replace(":", "");
+  MAC_suffix_str = macCleanForSuffix.substring(macCleanForSuffix.length() - 4);
 
-  String macCleanForSsid = MAC;
-  macCleanForSsid.replace(":", "");
-  String macSuffixForSsid = macCleanForSsid.substring(macCleanForSsid.length() - 4);
-  ssid = "ProtestInfo_" + macSuffixForSsid;
+  ssid = "ProtestInfo_" + MAC_suffix_str;
 
   // Step 2: Configure the actual SoftAP with the unique SSID and the chosen channel.
   // This is the definitive setting for the SoftAP channel.
@@ -135,7 +269,7 @@ void setup() {
   // Initialize ESP-NOW
   if (esp_now_init() != ESP_OK) {
     Serial.println("ESP-NOW init failed");
-    return; // Cannot proceed without ESP-NOW
+    while(true) { delay(100); } // Halt if ESP-NOW init fails
   }
 
   // Add trusted peers for sending messages
@@ -145,7 +279,7 @@ void setup() {
     memcpy(peer.peer_addr, trustedMACs[i], 6);
     // Peer channel MUST match the SoftAP channel (WIFI_CHANNEL)
     peer.channel = WIFI_CHANNEL;
-    peer.encrypt = false;   // No encryption for simplicity in this example
+    peer.encrypt = false;    // No encryption for simplicity in this example
     esp_err_t result = esp_now_add_peer(&peer);
     if (result == ESP_OK)
       Serial.println("Peer added: " + formatMac(trustedMACs[i]));
@@ -158,37 +292,75 @@ void setup() {
 }
 
 void loop() {
+  // --- Process Incoming Messages from Queue ---
+  esp_now_message_t receivedMessage;
+  while (xQueueReceive(messageQueue, &receivedMessage, 0) == pdPASS) {
+    // Ensure content is null-terminated before using with String, just in case
+    receivedMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0';
+    String incomingContent = String(receivedMessage.content);
+    String originalSenderMacSuffix = getMacSuffix(receivedMessage.originalSenderMac); // Use new helper
+
+    String formattedIncoming = String("[") + String(receivedMessage.messageID, HEX) + "] Node " + originalSenderMacSuffix + " - " + incomingContent;
+    
+    // Prepend new messages to buffer (most recent on top)
+    serialBuffer = formattedIncoming + "\n" + serialBuffer;
+    if (serialBuffer.length() > 4000) // Keep buffer from growing too large
+      serialBuffer = serialBuffer.substring(0, 4000); // Take the most recent 4000 chars
+    Serial.println("Message received from queue: " + formattedIncoming);
+
+#if USE_DISPLAY
+    if (displayActive) displayLastLines(22);
+#endif
+
+    // Re-broadcast the message to other peers (mesh behavior)
+    sendToAllPeers(receivedMessage);
+  }
+
+
   // Periodically send an auto-generated message (if no user message is pending)
   if (millis() - lastUpdate >= 5000) {
     lastUpdate = millis();
-    char messageID[9];
-    snprintf(messageID, sizeof(messageID), "%08X", esp_random()); // Generate random ID
-
-    String macCleanForMsg = MAC;
-    macCleanForMsg.replace(":", "");
-    String macSuffixForMsg = macCleanForMsg.substring(macCleanForMsg.length() - 4); // For auto-generated messages
-
+    
     // Only send the automatically generated message if there's no user input pending
     if (userMessageBuffer.length() == 0) {
-      char msg[128];
-      // Auto-generated messages indicate they are from this node's MAC suffix
-      snprintf(msg, sizeof(msg), "[%s] Node %s - \"Auto Message %d\"", messageID, macSuffixForMsg.c_str(), counter);
+      esp_now_message_t autoMessage;
+      // It's good practice to clear the struct before populating, especially char arrays
+      memset(&autoMessage, 0, sizeof(esp_now_message_t)); 
+
+      autoMessage.messageID = esp_random();
+      uint8_t selfMac[6];
+      // Convert our own MAC_full_str to bytes
+      sscanf(MAC_full_str.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", 
+             (unsigned int*)&selfMac[0], (unsigned int*)&selfMac[1], 
+             (unsigned int*)&selfMac[2], (unsigned int*)&selfMac[3], 
+             (unsigned int*)&selfMac[4], (unsigned int*)&selfMac[5]);
+      memcpy(autoMessage.originalSenderMac, selfMac, 6);
+      
+      char msgContentBuf[MAX_MESSAGE_CONTENT_LEN]; // Use a temporary buffer for snprintf
+      snprintf(msgContentBuf, sizeof(msgContentBuf), "\"Auto Message %d\"", counter);
+      
+      // Copy content from temporary buffer to struct, ensuring null termination
+      strncpy(autoMessage.content, msgContentBuf, sizeof(autoMessage.content));
+      autoMessage.content[sizeof(autoMessage.content) - 1] = '\0'; // Explicitly ensure null termination
+
+      String formattedMessage = String("[") + String(autoMessage.messageID, HEX) + "] Node " + MAC_suffix_str + " - " + String(autoMessage.content);
+
+      // Add to seen messages cache immediately (so we don't process our own broadcast as an incoming message)
+      addMessageToSeen(autoMessage.messageID, autoMessage.originalSenderMac);
 
       // Prepend new messages to buffer (most recent on top)
-      if (serialBuffer.indexOf("[" + String(messageID) + "]") == -1) { // Prevent adding if already there
-        serialBuffer = String(msg) + "\n" + serialBuffer; // Prepend here
-        Serial.println("Sending (Auto): " + String(msg));
-        counter++;
+      serialBuffer = formattedMessage + "\n" + serialBuffer; // Prepend here
+      Serial.println("Sending (Auto): " + formattedMessage);
+      counter++;
 
-        if (serialBuffer.length() > 4000) // Keep buffer manageable
-          serialBuffer = serialBuffer.substring(0, 4000); // Truncate from the end
+      if (serialBuffer.length() > 4000) // Keep buffer manageable
+        serialBuffer = serialBuffer.substring(0, 4000); // Truncate from the end
 
-        sendToAllPeers(msg); // Send via ESP-NOW
+      sendToAllPeers(autoMessage); // Send via ESP-NOW
 
 #if USE_DISPLAY
-        if (displayActive) displayLastLines(22); // Call after declaration now
+      if (displayActive) displayLastLines(22);
 #endif
-      }
     }
   }
 
@@ -254,8 +426,13 @@ void loop() {
               } else if (decodedMessage.length() == 0) {
                 webFeedbackMessage = "<p class='feedback' style='color:orange;'>Please enter a message.</p>";
               } else {
+                // IMPORTANT: Ensure decodedMessage length doesn't exceed MAX_MESSAGE_CONTENT_LEN - 1
+                if (decodedMessage.length() >= MAX_MESSAGE_CONTENT_LEN) {
+                    decodedMessage = decodedMessage.substring(0, MAX_MESSAGE_CONTENT_LEN - 1);
+                    webFeedbackMessage = "<p class='feedback' style='color:orange;'>Message truncated due to length limit.</p>";
+                }
                 userMessageBuffer = decodedMessage; // Store message for ESP-NOW sending
-                webFeedbackMessage = "<p class='feedback' style='color:green;'>Message queued for sending!</p>";
+                webFeedbackMessage = "<p class='feedback' style='color:green;'>Message queued for sending!</p>" + webFeedbackMessage; // Append any previous feedback
                 Serial.println("User message received from web: " + userMessageBuffer);
               }
             } // End if (isPost)
@@ -299,11 +476,7 @@ void loop() {
             client.println(F("<p>This node is part of a mesh network. Information may be delayed.</p>"));
             
             // --- Display only the last four HEX characters of the MAC address on the webpage ---
-            String macForWebDisplay = MAC;
-            macForWebDisplay.replace(":", "");
-            String macSuffixForDisplay = macForWebDisplay.substring(macForWebDisplay.length() - 4);
-
-            client.printf("<p class='info-line'><strong>IP:</strong> %s | <strong>MAC:</strong> %s</p>", IP.toString().c_str(), macSuffixForDisplay.c_str());
+            client.printf("<p class='info-line'><strong>IP:</strong> %s | <strong>MAC:</strong> %s</p>", IP.toString().c_str(), MAC_suffix_str.c_str());
             client.println(F("</header>"));
 
             // Display feedback message from server processing
@@ -357,41 +530,51 @@ void loop() {
 
   // --- Process User Message (if successfully validated from the web interface) ---
   if (userMessageBuffer.length() > 0) {
-    char messageID[9];
-    snprintf(messageID, sizeof(messageID), "%08X", esp_random()); // Unique ID for this message
+    esp_now_message_t userEspNowMessage;
+    // Clear the struct to ensure all bytes are zero, especially the content buffer
+    memset(&userEspNowMessage, 0, sizeof(esp_now_message_t)); 
 
-    String macCleanForMsg = MAC;
-    macCleanForMsg.replace(":", "");
-    String macSuffixForMsg = macCleanForMsg.substring(macCleanForMsg.length() - 4);
+    userEspNowMessage.messageID = esp_random();
+    uint8_t selfMac[6];
+    // Convert our own MAC_full_str to bytes
+    sscanf(MAC_full_str.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", 
+           (unsigned int*)&selfMac[0], (unsigned int*)&selfMac[1], 
+           (unsigned int*)&selfMac[2], (unsigned int*)&selfMac[3], 
+           (unsigned int*)&selfMac[4], (unsigned int*)&selfMac[5]);
+    memcpy(userEspNowMessage.originalSenderMac, selfMac, 6);
+    
+    // Copy content from String to char array, ensuring null termination.
+    strncpy(userEspNowMessage.content, userMessageBuffer.c_str(), MAX_MESSAGE_CONTENT_LEN);
+    userEspNowMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0'; // Explicitly ensure null termination
 
     // User-sent messages now indicate they are from "User via Node [MAC suffix]"
-    String messageToSend = "[" + String(messageID) + "] User via Node " + macSuffixForMsg + " - " + userMessageBuffer;
+    String messageToSendFormatted = String("[") + String(userEspNowMessage.messageID, HEX) + "] User via Node " + MAC_suffix_str + " - " + userMessageBuffer;
+
+    // Add to seen messages cache immediately
+    addMessageToSeen(userEspNowMessage.messageID, userEspNowMessage.originalSenderMac);
 
     // Prepend new messages to serialBuffer (most recent on top) and send via ESP-NOW
-    if (serialBuffer.indexOf("[" + String(messageID) + "]") == -1) { // Prevent adding if already there
-      serialBuffer = messageToSend + "\n" + serialBuffer; // Prepend here
-      Serial.println("Broadcasting (User): " + messageToSend);
+    serialBuffer = messageToSendFormatted + "\n" + serialBuffer; // Prepend here
+    Serial.println("Broadcasting (User): " + messageToSendFormatted);
 
-      if (serialBuffer.length() > 4000) // Keep buffer manageable
-        serialBuffer = serialBuffer.substring(0, 4000); // Truncate from the end
+    if (serialBuffer.length() > 4000) // Keep buffer manageable
+      serialBuffer = serialBuffer.substring(0, 4000); // Truncate from the end
 
-      sendToAllPeers(messageToSend); // Broadcast the message
+    sendToAllPeers(userEspNowMessage); // Broadcast the message
 
 #if USE_DISPLAY
-      if (displayActive) displayLastLines(22); // Call after declaration now
+    if (displayActive) displayLastLines(22);
 #endif
-    }
     userMessageBuffer = ""; // Clear the buffer after processing
   }
 }
 
 // Displays the most recent N lines of the serialBuffer on the TFT display
-// The full definition of the function appears here.
 #if USE_DISPLAY
 void displayLastLines(int numLines) {
   tft.fillScreen(TFT_BLACK);
   tft.setCursor(0, 0);
-  tft.setTextColor(TFT_CYAN);     tft.println("MAC: " + MAC); // Full MAC on display
+  tft.setTextColor(TFT_CYAN);     tft.println("MAC: " + MAC_full_str); // Full MAC on display
   tft.setTextColor(TFT_GREEN);    tft.println("IP: " + IP.toString());
   tft.setTextColor(TFT_WHITE);    tft.println("----------------------");
 
