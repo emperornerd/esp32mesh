@@ -2,7 +2,6 @@
 #include <esp_now.h>
 #include <esp_wifi.h> // Include for esp_wifi_set_channel
 #include <vector>     // For dynamic array for the cache
-#include <chrono>     // For timestamping cache entries
 #include <algorithm>  // For std::remove_if, std::min_element
 #include <string.h>   // For strncpy and memset
 
@@ -39,11 +38,12 @@ String MAC_full_str; // Full MAC address of this ESP32 (e.g., "AA:BB:CC:DD:EE:FF
 String MAC_suffix_str; // Last 4 chars of our MAC (e.g., "EEFF")
 String ssid; // Our unique SSID
 
-String serialBuffer = "";       // Stores messages, most recent on top
+String serialBuffer = "";         // Stores messages, most recent on top
 String userMessageBuffer = "";  // To hold the user-entered message from POST
 String webFeedbackMessage = ""; // To send messages back to the web client (e.g., success/error)
 
 unsigned long lastUpdate = 0;
+unsigned long lastRebroadcast = 0; // New: Timestamp for last re-broadcast
 int counter = 1;
 
 // --- Message Structure for ESP-NOW and Deduplication ---
@@ -55,17 +55,18 @@ int counter = 1;
 #define MAX_TTL_HOPS 25 // Maximum Time-To-Live (hops) for a message
 
 typedef struct __attribute__((packed)) {
-  uint32_t messageID;       // Unique ID for the message
+  uint32_t messageID;         // Unique ID for the message
   uint8_t originalSenderMac[6]; // MAC address of the *original* sender
-  uint8_t ttl;              // Time-To-Live (hops remaining)
+  uint8_t ttl;                // Time-To-Live (hops remaining)
   char content[MAX_MESSAGE_CONTENT_LEN]; // Message content
 } esp_now_message_t;
 
-// --- Cache for Deduplication ---
+// --- Cache for Deduplication and Re-broadcasting ---
 struct SeenMessage {
   uint32_t messageID;
   uint8_t originalSenderMac[6];
   unsigned long timestamp; // When this message was last seen/processed
+  esp_now_message_t messageData; // Store the full message for re-broadcasting
 };
 
 // Global vector for seen messages and mutex for thread-safe access
@@ -74,8 +75,13 @@ struct SeenMessage {
 std::vector<SeenMessage> seenMessages;
 portMUX_TYPE seenMessagesMutex = portMUX_INITIALIZER_UNLOCKED;
 
-const unsigned long DEDUP_CACHE_DURATION_MS = 10000; // How long to keep a message in cache (10 seconds)
+// Increased cache duration significantly
+const unsigned long DEDUP_CACHE_DURATION_MS = 600000; // 10 minutes (was 10 seconds)
 const size_t MAX_CACHE_SIZE = 50; // Max number of messages to keep in cache
+
+// New: Interval for periodic re-broadcasting of old messages from cache
+const unsigned long REBROADCAST_INTERVAL_MS = 60000; // Re-broadcast every 1 minute (adjust as needed)
+const unsigned long REBROADCAST_MIN_AGE_MS = 30000; // Only re-broadcast messages older than 30 seconds
 
 // --- FreeRTOS Queue for message processing ---
 QueueHandle_t messageQueue;
@@ -119,34 +125,47 @@ bool isMessageSeen(uint32_t id, const uint8_t* mac) {
   return found;
 }
 
-// Function to add a message to the seenMessages cache
-void addMessageToSeen(uint32_t id, const uint8_t* mac) {
+// Function to add or update a message in the seenMessages cache
+void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_message_t& msgData) {
   // Lock the mutex before accessing the shared resource
   portENTER_CRITICAL(&seenMessagesMutex);
 
-  // Remove old entries first
   unsigned long currentTime = millis();
-  seenMessages.erase(std::remove_if(seenMessages.begin(), seenMessages.end(),
+  bool updated = false;
+
+  // Try to find and update the timestamp if message already exists
+  for (auto& msg : seenMessages) {
+    if (msg.messageID == id && memcmp(msg.originalSenderMac, mac, 6) == 0) {
+      msg.timestamp = currentTime; // Update timestamp
+      updated = true;
+      break;
+    }
+  }
+
+  if (!updated) {
+    // Remove old entries if not updated
+    seenMessages.erase(std::remove_if(seenMessages.begin(), seenMessages.end(),
                                      [currentTime](const SeenMessage& msg) {
                                          return (currentTime - msg.timestamp) > DEDUP_CACHE_DURATION_MS;
                                      }),
                       seenMessages.end());
 
-  // If cache is full, remove the oldest one before adding new
-  if (seenMessages.size() >= MAX_CACHE_SIZE) {
-    // Find the oldest message (smallest timestamp)
-    auto oldest = std::min_element(seenMessages.begin(), seenMessages.end(),
-                                   [](const SeenMessage& a, const SeenMessage& b) {
-                                       return a.timestamp < b.timestamp;
-                                   });
-    if (oldest != seenMessages.end()) {
-        seenMessages.erase(oldest);
+    // If cache is full, remove the oldest one before adding new
+    if (seenMessages.size() >= MAX_CACHE_SIZE) {
+      // Find the oldest message (smallest timestamp)
+      auto oldest = std::min_element(seenMessages.begin(), seenMessages.end(),
+                                     [](const SeenMessage& a, const SeenMessage& b) {
+                                         return a.timestamp < b.timestamp;
+                                     });
+      if (oldest != seenMessages.end()) {
+          seenMessages.erase(oldest);
+      }
     }
-  }
 
-  SeenMessage newMessage = {id, {0}, currentTime};
-  memcpy(newMessage.originalSenderMac, mac, 6);
-  seenMessages.push_back(newMessage);
+    SeenMessage newMessage = {id, {0}, currentTime, msgData}; // Store full message data
+    memcpy(newMessage.originalSenderMac, mac, 6);
+    seenMessages.push_back(newMessage);
+  }
 
   // Unlock the mutex
   portEXIT_CRITICAL(&seenMessagesMutex);
@@ -173,11 +192,13 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
 
   // Check if already seen based on ID and original sender MAC
   if (isMessageSeen(incomingMessage.messageID, incomingMessage.originalSenderMac)) {
-    return; // Duplicate message, discard.
+    // If seen, update its timestamp to keep it fresh in cache and prevent its re-broadcast too soon
+    addOrUpdateMessageToSeen(incomingMessage.messageID, incomingMessage.originalSenderMac, incomingMessage);
+    return; // Duplicate message, discard from immediate processing.
   }
   
-  // Add to seen messages cache immediately
-  addMessageToSeen(incomingMessage.messageID, incomingMessage.originalSenderMac);
+  // Add to seen messages cache immediately (including its data for potential future re-broadcast)
+  addOrUpdateMessageToSeen(incomingMessage.messageID, incomingMessage.originalSenderMac, incomingMessage);
 
   // --- TTL Check ---
   // Only process and potentially re-broadcast if TTL is greater than 0
@@ -203,13 +224,13 @@ void sendToAllPeers(esp_now_message_t message) { // Pass by value so we can decr
   uint8_t currentMacBytes[6];
   // Convert our own MAC_full_str to bytes for comparison
   sscanf(MAC_full_str.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", 
-         (unsigned int*)&currentMacBytes[0], (unsigned int*)&currentMacBytes[1], 
-         (unsigned int*)&currentMacBytes[2], (unsigned int*)&currentMacBytes[3], 
-         (unsigned int*)&currentMacBytes[4], (unsigned int*)&currentMacBytes[5]);
+           (unsigned int*)&currentMacBytes[0], (unsigned int*)&currentMacBytes[1], 
+           (unsigned int*)&currentMacBytes[2], (unsigned int*)&currentMacBytes[3], 
+           (unsigned int*)&currentMacBytes[4], (unsigned int*)&currentMacBytes[5]);
 
   // --- Decrement TTL before sending ---
   // This is crucial for re-broadcasted messages.
-  if (message.ttl > 0) {
+  if (message.ttl > 0) { 
       message.ttl--; 
   } else {
       // This should ideally not happen if TTL check is done before calling sendToAllPeers
@@ -222,13 +243,13 @@ void sendToAllPeers(esp_now_message_t message) { // Pass by value so we can decr
     // Prevent sending back to the original sender to avoid loops in the mesh.
     // Also, don't send to ourselves if we are the original sender (to avoid sending it back to us,
     // although our local addMessageToSeen already handles our own messages as "seen").
-    if (memcmp(trustedMACs[i], message.originalSenderMac, 6) != 0 || memcmp(trustedMACs[i], currentMacBytes, 6) != 0) {
+    if (memcmp(trustedMACs[i], message.originalSenderMac, 6) != 0 && memcmp(trustedMACs[i], currentMacBytes, 6) != 0) {
       esp_err_t result = esp_now_send(trustedMACs[i], (uint8_t*)&message, sizeof(esp_now_message_t));
       if (result != ESP_OK)
         Serial.printf("Send to %s failed (err %d)\n", formatMac(trustedMACs[i]).c_str(), result);
       // Removed TTL from this Serial.printf as well
       // else
-      //   Serial.printf("Sent to %s: %s\n", formatMac(trustedMACs[i]).c_str(), message.content);
+      //    Serial.printf("Sent to %s: %s\n", formatMac(trustedMACs[i]).c_str(), message.content);
     } else {
         // Serial.printf("Skipping send to original sender or self: %s\n", formatMac(trustedMACs[i]).c_str());
     }
@@ -337,10 +358,44 @@ void loop() {
     // Re-broadcast the message to other peers (mesh behavior)
     // Only re-broadcast if TTL is still greater than 0 *before* this node decrements it.
     // The `sendToAllPeers` function will handle the decrement itself.
-    if (receivedMessage.ttl > 0) { 
+    if (receivedMessage.ttl > 0) {  
         sendToAllPeers(receivedMessage);
     } else {
         Serial.println("Message reached TTL limit, not re-broadcasting.");
+    }
+  }
+
+  // --- Periodic Re-broadcast of Old Messages from Cache ---
+  if (millis() - lastRebroadcast >= REBROADCAST_INTERVAL_MS) {
+    lastRebroadcast = millis();
+    unsigned long currentTime = millis();
+    Serial.println("Performing periodic re-broadcast check.");
+
+    portENTER_CRITICAL(&seenMessagesMutex); // Lock while iterating/modifying cache
+    std::vector<esp_now_message_t> messagesToRebroadcast;
+
+    for (const auto& seenMsg : seenMessages) {
+      // Re-broadcast messages that are old enough, but still have TTL
+      // AND are not from this node (to avoid re-broadcasting our own initial messages too frequently)
+      uint8_t selfMac[6];
+      sscanf(MAC_full_str.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", 
+             (unsigned int*)&selfMac[0], (unsigned int*)&selfMac[1], 
+             (unsigned int*)&selfMac[2], (unsigned int*)&selfMac[3], 
+             (unsigned int*)&selfMac[4], (unsigned int*)&selfMac[5]);
+
+      if ((currentTime - seenMsg.timestamp) >= REBROADCAST_MIN_AGE_MS && seenMsg.messageData.ttl > 0 &&
+          memcmp(seenMsg.originalSenderMac, selfMac, 6) != 0) {
+        messagesToRebroadcast.push_back(seenMsg.messageData);
+      }
+    }
+    portEXIT_CRITICAL(&seenMessagesMutex); // Unlock after preparing list
+
+    for (const auto& msg : messagesToRebroadcast) {
+      Serial.printf("Re-broadcasting cached message from Node %s: %s (TTL: %d)\n",
+                    getMacSuffix(msg.originalSenderMac).c_str(), msg.content, msg.ttl);
+      sendToAllPeers(msg); // This will decrement TTL before sending
+      // Update the timestamp in the cache for the re-broadcasted message
+      addOrUpdateMessageToSeen(msg.messageID, msg.originalSenderMac, msg);
     }
   }
 
@@ -376,7 +431,8 @@ void loop() {
       String formattedMessage = "Node " + MAC_suffix_str + " - " + String(autoMessage.content);
 
       // Add to seen messages cache immediately (so we don't process our own broadcast as an incoming message)
-      addMessageToSeen(autoMessage.messageID, autoMessage.originalSenderMac);
+      // Store the full message data for potential re-broadcast later
+      addOrUpdateMessageToSeen(autoMessage.messageID, autoMessage.originalSenderMac, autoMessage);
 
       // Prepend new messages to buffer (most recent on top)
       serialBuffer = formattedMessage + "\n" + serialBuffer; // Prepend here
@@ -582,8 +638,8 @@ void loop() {
     // Formatted string WITHOUT messageID or TTL
     String messageToSendFormatted = "User via Node " + MAC_suffix_str + " - " + userMessageBuffer;
 
-    // Add to seen messages cache immediately
-    addMessageToSeen(userEspNowMessage.messageID, userEspNowMessage.originalSenderMac);
+    // Add to seen messages cache immediately, storing the full message for potential re-broadcast
+    addOrUpdateMessageToSeen(userEspNowMessage.messageID, userEspNowMessage.originalSenderMac, userEspNowMessage);
 
     // Prepend new messages to serialBuffer (most recent on top) and send via ESP-NOW
     serialBuffer = messageToSendFormatted + "\n" + serialBuffer; // Prepend here
@@ -606,9 +662,9 @@ void loop() {
 void displayLastLines(int numLines) {
   tft.fillScreen(TFT_BLACK);
   tft.setCursor(0, 0);
-  tft.setTextColor(TFT_CYAN);     tft.println("MAC: " + MAC_full_str); // Full MAC on display
-  tft.setTextColor(TFT_GREEN);    tft.println("IP: " + IP.toString());
-  tft.setTextColor(TFT_WHITE);    tft.println("----------------------");
+  tft.setTextColor(TFT_CYAN);      tft.println("MAC: " + MAC_full_str); // Full MAC on display
+  tft.setTextColor(TFT_GREEN);     tft.println("IP: " + IP.toString());
+  tft.setTextColor(TFT_WHITE);     tft.println("----------------------");
 
   // Since serialBuffer has most recent on top, we just print from the beginning
   int linesPrinted = 0;
