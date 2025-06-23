@@ -43,7 +43,8 @@ String userMessageBuffer = "";  // To hold the user-entered message from POST
 String webFeedbackMessage = ""; // To send messages back to the web client (e.g., success/error)
 
 unsigned long lastUpdate = 0;
-unsigned long lastRebroadcast = 0; // New: Timestamp for last re-broadcast
+unsigned long lastRebroadcast = 0; // Timestamp for last re-broadcast
+unsigned long nextRebroadcastInterval = 0; // Stores the next random re-broadcast interval
 int counter = 1;
 
 // --- Message Structure for ESP-NOW and Deduplication ---
@@ -52,7 +53,7 @@ int counter = 1;
 // Message content size should be 240 bytes (max 250 bytes - 10 for ID/MAC/TTL).
 // If you change content size, update MAX_MESSAGE_CONTENT_LEN
 #define MAX_MESSAGE_CONTENT_LEN 239 // 250 (max ESP-NOW) - 4 (ID) - 6 (MAC) - 1 (TTL) = 239
-#define MAX_TTL_HOPS 25 // Maximum Time-To-Live (hops) for a message
+#define MAX_TTL_HOPS 20 // Maximum Time-To-Live (hops) for a message (Changed from 25 to 20)
 
 typedef struct __attribute__((packed)) {
   uint32_t messageID;         // Unique ID for the message
@@ -76,11 +77,14 @@ std::vector<SeenMessage> seenMessages;
 portMUX_TYPE seenMessagesMutex = portMUX_INITIALIZER_UNLOCKED;
 
 // Increased cache duration significantly
-const unsigned long DEDUP_CACHE_DURATION_MS = 600000; // 10 minutes (was 10 seconds)
+const unsigned long DEDUP_CACHE_DURATION_MS = 600000; // 10 minutes
 const size_t MAX_CACHE_SIZE = 50; // Max number of messages to keep in cache
 
 // New: Interval for periodic re-broadcasting of old messages from cache
-const unsigned long REBROADCAST_INTERVAL_MS = 60000; // Re-broadcast every 1 minute (adjust as needed)
+// Re-broadcast will be 2.5 minutes (150s) +/- 30 seconds (30s) = 120s to 180s
+const unsigned long REBROADCAST_CENTER_MS = 150000; // 2.5 minutes
+const unsigned long REBROADCAST_RANDOM_RANGE_MS = 30000; // +/- 30 seconds
+
 const unsigned long REBROADCAST_MIN_AGE_MS = 30000; // Only re-broadcast messages older than 30 seconds
 
 // --- FreeRTOS Queue for message processing ---
@@ -107,7 +111,6 @@ String getMacSuffix(const uint8_t *mac) {
   snprintf(buf, sizeof(buf), "%02X%02X", mac[4], mac[5]); // Last two bytes (4 hex chars)
   return String(buf);
 }
-
 
 // Function to check if a message is already in the seenMessages cache
 bool isMessageSeen(uint32_t id, const uint8_t* mac) {
@@ -170,7 +173,6 @@ void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_mes
   // Unlock the mutex
   portEXIT_CRITICAL(&seenMessagesMutex);
 }
-
 
 // Callback function when ESP-NOW data is received
 // IMPORTANT: Keep this function as lean as possible!
@@ -259,6 +261,15 @@ void sendToAllPeers(esp_now_message_t message) { // Pass by value so we can decr
 void setup() {
   Serial.begin(115200);
 
+  // Initialize random seed for esp_random() and random()
+  // Ensure this is called once at startup
+  // Removed: esp_read_mac(NULL,0); // Reads MAC, but also seeds the random number generator on newer ESP-IDF
+  randomSeed(analogRead(0)); // Standard Arduino way to seed the random number generator
+  // Note: esp_random() provides cryptographically secure random numbers
+  // and does not need explicit seeding in newer ESP-IDF versions.
+  // We keep randomSeed(analogRead(0)) for general Arduino compatibility and
+  // to ensure good entropy for the 'random' function.
+
   // Create the FreeRTOS message queue
   messageQueue = xQueueCreate(QUEUE_SIZE, sizeof(esp_now_message_t));
   if (messageQueue == NULL) {
@@ -331,6 +342,14 @@ void setup() {
 
   // Register the receive callback function
   esp_now_register_recv_cb(onDataRecv);
+
+  // Initialize lastUpdate to ensure first automated message is sent immediately
+  lastUpdate = millis() - 30000; // Trigger immediately for first message
+  
+  // Calculate the first random re-broadcast interval
+  nextRebroadcastInterval = random(REBROADCAST_CENTER_MS - REBROADCAST_RANDOM_RANGE_MS,
+                                   REBROADCAST_CENTER_MS + REBROADCAST_RANDOM_RANGE_MS + 1); // +1 for upper bound inclusivity
+  lastRebroadcast = millis(); // Initialize for the first re-broadcast check
 }
 
 void loop() {
@@ -366,10 +385,14 @@ void loop() {
   }
 
   // --- Periodic Re-broadcast of Old Messages from Cache ---
-  if (millis() - lastRebroadcast >= REBROADCAST_INTERVAL_MS) {
+  if (millis() - lastRebroadcast >= nextRebroadcastInterval) {
     lastRebroadcast = millis();
+    // Calculate the next random interval
+    nextRebroadcastInterval = random(REBROADCAST_CENTER_MS - REBROADCAST_RANDOM_RANGE_MS,
+                                     REBROADCAST_CENTER_MS + REBROADCAST_RANDOM_RANGE_MS + 1); // +1 for upper bound inclusivity
+    Serial.printf("Performing periodic re-broadcast check. Next check in %lu ms.\n", nextRebroadcastInterval);
+
     unsigned long currentTime = millis();
-    Serial.println("Performing periodic re-broadcast check.");
 
     portENTER_CRITICAL(&seenMessagesMutex); // Lock while iterating/modifying cache
     std::vector<esp_now_message_t> messagesToRebroadcast;
@@ -380,7 +403,7 @@ void loop() {
       uint8_t selfMac[6];
       sscanf(MAC_full_str.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", 
              (unsigned int*)&selfMac[0], (unsigned int*)&selfMac[1], 
-             (unsigned int*)&selfMac[2], (unsigned int*)&selfMac[3], 
+             (unsigned int*)&selfMac[2], (unsigned int*)&selfMac[3], // THIS LINE WAS THE TYPO
              (unsigned int*)&selfMac[4], (unsigned int*)&selfMac[5]);
 
       if ((currentTime - seenMsg.timestamp) >= REBROADCAST_MIN_AGE_MS && seenMsg.messageData.ttl > 0 &&
@@ -395,13 +418,15 @@ void loop() {
                     getMacSuffix(msg.originalSenderMac).c_str(), msg.content, msg.ttl);
       sendToAllPeers(msg); // This will decrement TTL before sending
       // Update the timestamp in the cache for the re-broadcasted message
+      // This ensures it stays in the cache for the full DEDUP_CACHE_DURATION_MS from *now*
+      // and won't be re-broadcast again until it passes REBROADCAST_MIN_AGE_MS again.
       addOrUpdateMessageToSeen(msg.messageID, msg.originalSenderMac, msg);
     }
   }
 
 
-  // Periodically send an auto-generated message (if no user message is pending)
-  if (millis() - lastUpdate >= 5000) {
+  // Periodically send an auto-generated message (now immediately and every 30 seconds thereafter)
+  if (millis() - lastUpdate >= 30000) { // Changed from 5000 to 30000 ms
     lastUpdate = millis();
     
     // Only send the automatically generated message if there's no user input pending
@@ -445,7 +470,7 @@ void loop() {
       sendToAllPeers(autoMessage); // Send via ESP-NOW
 
 #if USE_DISPLAY
-      if (displayActive) displayLastLines(22);
+    if (displayActive) displayLastLines(22);
 #endif
     }
   }
