@@ -2,10 +2,12 @@
 #include <esp_now.h>
 #include <esp_wifi.h> // Include for esp_wifi_set_channel
 #include <vector>     // For dynamic array for the cache
-#include <algorithm>  // For std::remove_if, std::min_element
+#include <algorithm>  // For std::remove_if, std::min_element, std::sort
 #include <string.h>   // For strncpy and memset
+#include <set>        // For storing unique MACs for display
 
 #define USE_DISPLAY true
+
 #if USE_DISPLAY
 #include <TFT_eSPI.h>
 TFT_eSPI tft = TFT_eSPI();
@@ -27,7 +29,6 @@ const uint8_t trustedMACs[][6] = {
 };
 const int numTrusted = sizeof(trustedMACs) / sizeof(trustedMACs[0]);
 
-
 // Define a consistent channel for both SoftAP and ESP-NOW
 // Channel 1 is a common default and good starting point.
 const int WIFI_CHANNEL = 1;
@@ -45,6 +46,7 @@ String webFeedbackMessage = ""; // To send messages back to the web client (e.g.
 unsigned long lastUpdate = 0;
 unsigned long lastRebroadcast = 0; // Timestamp for last re-broadcast
 unsigned long nextRebroadcastInterval = 0; // Stores the next random re-broadcast interval
+
 int counter = 1;
 
 // --- Message Structure for ESP-NOW and Deduplication ---
@@ -84,7 +86,6 @@ const size_t MAX_CACHE_SIZE = 50; // Max number of messages to keep in cache
 // Re-broadcast will be 2.5 minutes (150s) +/- 30 seconds (30s) = 120s to 180s
 const unsigned long REBROADCAST_CENTER_MS = 150000; // 2.5 minutes
 const unsigned long REBROADCAST_RANDOM_RANGE_MS = 30000; // +/- 30 seconds
-
 const unsigned long REBROADCAST_MIN_AGE_MS = 30000; // Only re-broadcast messages older than 30 seconds
 
 // --- FreeRTOS Queue for message processing ---
@@ -112,6 +113,15 @@ String getMacSuffix(const uint8_t *mac) {
   return String(buf);
 }
 
+// Corrected: Helper function to format MAC for display as xxxx.xxxx.xxxx.EEFF (last 2 bytes unmasked)
+String formatMaskedMac(const uint8_t *mac) {
+  char buf[20]; // Sufficient buffer for "xxxx.xxxx.xxxx.EEFF" + null terminator
+  // Mask first three segments, then show the last two bytes (mac[4] and mac[5])
+  snprintf(buf, sizeof(buf), "xxxx.xxxx.xxxx.%02X%02X",
+           mac[4], mac[5]);
+  return String(buf);
+}
+
 // Function to check if a message is already in the seenMessages cache
 bool isMessageSeen(uint32_t id, const uint8_t* mac) {
   // Lock the mutex before accessing the shared resource
@@ -132,10 +142,8 @@ bool isMessageSeen(uint32_t id, const uint8_t* mac) {
 void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_message_t& msgData) {
   // Lock the mutex before accessing the shared resource
   portENTER_CRITICAL(&seenMessagesMutex);
-
   unsigned long currentTime = millis();
   bool updated = false;
-
   // Try to find and update the timestamp if message already exists
   for (auto& msg : seenMessages) {
     if (msg.messageID == id && memcmp(msg.originalSenderMac, mac, 6) == 0) {
@@ -144,7 +152,6 @@ void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_mes
       break;
     }
   }
-
   if (!updated) {
     // Remove old entries if not updated
     seenMessages.erase(std::remove_if(seenMessages.begin(), seenMessages.end(),
@@ -152,7 +159,6 @@ void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_mes
                                          return (currentTime - msg.timestamp) > DEDUP_CACHE_DURATION_MS;
                                      }),
                       seenMessages.end());
-
     // If cache is full, remove the oldest one before adding new
     if (seenMessages.size() >= MAX_CACHE_SIZE) {
       // Find the oldest message (smallest timestamp)
@@ -164,12 +170,10 @@ void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_mes
           seenMessages.erase(oldest);
       }
     }
-
     SeenMessage newMessage = {id, {0}, currentTime, msgData}; // Store full message data
     memcpy(newMessage.originalSenderMac, mac, 6);
     seenMessages.push_back(newMessage);
   }
-
   // Unlock the mutex
   portEXIT_CRITICAL(&seenMessagesMutex);
 }
@@ -182,12 +186,12 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
     // Serial.println("Received malformed ESP-NOW message (wrong size)"); // Cannot print from ISR directly
     return;
   }
-
   esp_now_message_t incomingMessage;
   // Use memset to clear the structure before copying to avoid junk data,
   // especially if the received 'len' is smaller than the struct (though we check 'len').
   memset(&incomingMessage, 0, sizeof(esp_now_message_t));
   memcpy(&incomingMessage, data, sizeof(esp_now_message_t));
+
   // Ensure null-termination of the content, as memcpy doesn't guarantee it if source isn't null-terminated
   // or if the source is exactly MAX_MESSAGE_CONTENT_LEN long.
   incomingMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0';
@@ -219,7 +223,6 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
     portYIELD_FROM_ISR(); // Yield to a higher priority task if one was unblocked
   }
 }
-
 
 // Sends a message to all trusted ESP-NOW peers
 void sendToAllPeers(esp_now_message_t message) { // Pass by value so we can decrement TTL locally
@@ -260,7 +263,6 @@ void sendToAllPeers(esp_now_message_t message) { // Pass by value so we can decr
 
 void setup() {
   Serial.begin(115200);
-
   // Initialize random seed for esp_random() and random()
   // Ensure this is called once at startup
   // Removed: esp_read_mac(NULL,0); // Reads MAC, but also seeds the random number generator on newer ESP-IDF
@@ -294,7 +296,6 @@ void setup() {
   String macCleanForSuffix = MAC_full_str;
   macCleanForSuffix.replace(":", "");
   MAC_suffix_str = macCleanForSuffix.substring(macCleanForSuffix.length() - 4);
-
   ssid = "ProtestInfo_" + MAC_suffix_str;
 
   // Step 2: Configure the actual SoftAP with the unique SSID and the chosen channel.
@@ -369,11 +370,9 @@ void loop() {
     if (serialBuffer.length() > 4000) // Keep buffer from growing too large
       serialBuffer = serialBuffer.substring(0, 4000); // Take the most recent 4000 chars
     Serial.println("Message received from queue: " + formattedIncoming);
-
 #if USE_DISPLAY
     if (displayActive) displayLastLines(22);
 #endif
-
     // Re-broadcast the message to other peers (mesh behavior)
     // Only re-broadcast if TTL is still greater than 0 *before* this node decrements it.
     // The `sendToAllPeers` function will handle the decrement itself.
@@ -391,28 +390,23 @@ void loop() {
     nextRebroadcastInterval = random(REBROADCAST_CENTER_MS - REBROADCAST_RANDOM_RANGE_MS,
                                      REBROADCAST_CENTER_MS + REBROADCAST_RANDOM_RANGE_MS + 1); // +1 for upper bound inclusivity
     Serial.printf("Performing periodic re-broadcast check. Next check in %lu ms.\n", nextRebroadcastInterval);
-
     unsigned long currentTime = millis();
-
     portENTER_CRITICAL(&seenMessagesMutex); // Lock while iterating/modifying cache
     std::vector<esp_now_message_t> messagesToRebroadcast;
-
     for (const auto& seenMsg : seenMessages) {
       // Re-broadcast messages that are old enough, but still have TTL
       // AND are not from this node (to avoid re-broadcasting our own initial messages too frequently)
       uint8_t selfMac[6];
       sscanf(MAC_full_str.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", 
              (unsigned int*)&selfMac[0], (unsigned int*)&selfMac[1], 
-             (unsigned int*)&selfMac[2], (unsigned int*)&selfMac[3], // THIS LINE WAS THE TYPO
+             (unsigned int*)&selfMac[2], (unsigned int*)&selfMac[3], 
              (unsigned int*)&selfMac[4], (unsigned int*)&selfMac[5]);
-
       if ((currentTime - seenMsg.timestamp) >= REBROADCAST_MIN_AGE_MS && seenMsg.messageData.ttl > 0 &&
           memcmp(seenMsg.originalSenderMac, selfMac, 6) != 0) {
         messagesToRebroadcast.push_back(seenMsg.messageData);
       }
     }
     portEXIT_CRITICAL(&seenMessagesMutex); // Unlock after preparing list
-
     for (const auto& msg : messagesToRebroadcast) {
       Serial.printf("Re-broadcasting cached message from Node %s: %s (TTL: %d)\n",
                     getMacSuffix(msg.originalSenderMac).c_str(), msg.content, msg.ttl);
@@ -424,7 +418,6 @@ void loop() {
     }
   }
 
-
   // Periodically send an auto-generated message (now immediately and every 30 seconds thereafter)
   if (millis() - lastUpdate >= 30000) { // Changed from 5000 to 30000 ms
     lastUpdate = millis();
@@ -434,7 +427,6 @@ void loop() {
       esp_now_message_t autoMessage;
       // It's good practice to clear the struct before populating, especially char arrays
       memset(&autoMessage, 0, sizeof(esp_now_message_t)); 
-
       autoMessage.messageID = esp_random(); // Still generated for deduplication
       uint8_t selfMac[6];
       // Convert our own MAC_full_str to bytes
@@ -454,7 +446,6 @@ void loop() {
 
       // Formatted string WITHOUT messageID or TTL
       String formattedMessage = "Node " + MAC_suffix_str + " - " + String(autoMessage.content);
-
       // Add to seen messages cache immediately (so we don't process our own broadcast as an incoming message)
       // Store the full message data for potential re-broadcast later
       addOrUpdateMessageToSeen(autoMessage.messageID, autoMessage.originalSenderMac, autoMessage);
@@ -463,12 +454,9 @@ void loop() {
       serialBuffer = formattedMessage + "\n" + serialBuffer; // Prepend here
       Serial.println("Sending (Auto): " + formattedMessage);
       counter++;
-
       if (serialBuffer.length() > 4000) // Keep buffer manageable
         serialBuffer = serialBuffer.substring(0, 4000); // Truncate from the end
-
       sendToAllPeers(autoMessage); // Send via ESP-NOW
-
 #if USE_DISPLAY
     if (displayActive) displayLastLines(22);
 #endif
@@ -498,7 +486,6 @@ void loop() {
                 postBody += (char)client.read();
               }
               Serial.println("Received POST Body: " + postBody);
-
               // Parse the POST body for message and password parameters
               String messageParam = "";
               String passwordParam = "";
@@ -508,7 +495,6 @@ void loop() {
                 if (messageEnd == -1) messageEnd = postBody.length(); // If '&' not found, it's the end
                 messageParam = postBody.substring(messageStart + 8, messageEnd);
               }
-
               int passwordStart = postBody.indexOf("password=");
               if (passwordStart != -1) {
                 int passwordEnd = postBody.indexOf('&', passwordStart);
@@ -548,12 +534,41 @@ void loop() {
               }
             } // End if (isPost)
 
+            // --- Gather unique seen MACs for display (most recent four) ---
+            std::vector<SeenMessage> recentSeenMessages;
+            portENTER_CRITICAL(&seenMessagesMutex); // Lock while accessing seenMessages
+            // Copy relevant parts for sorting to a temporary vector
+            for (const auto& seenMsg : seenMessages) {
+                recentSeenMessages.push_back(seenMsg); // Copy entire struct for sorting
+            }
+            portEXIT_CRITICAL(&seenMessagesMutex); // Unlock
+
+            // Sort by timestamp in descending order (most recent first)
+            std::sort(recentSeenMessages.begin(), recentSeenMessages.end(),
+                      [](const SeenMessage& a, const SeenMessage& b) {
+                          return a.timestamp > b.timestamp; // Descending order
+                      });
+
+            String detectedNodesHtmlContent = "";
+            detectedNodesHtmlContent += "<p class='detected-nodes-title'>Detected Original Senders:</p>";
+            // Take up to the most recent 4
+            int count = 0;
+            for (const auto& seenMsg : recentSeenMessages) {
+                if (count >= 4) break; // Limit to 4
+                detectedNodesHtmlContent += "<p class='detected-node-item'>" + formatMaskedMac(seenMsg.originalSenderMac) + "</p>";
+                count++;
+            }
+            // If empty, add a placeholder
+            if (count == 0) {
+                detectedNodesHtmlContent += "<p class='detected-node-item'>None detected yet</p>";
+            }
+
+
             // --- Send HTTP Response (always send the page back) ---
             client.println(F("HTTP/1.1 200 OK"));
             client.println(F("Content-type:text/html"));
             client.println(F("Connection: close")); // Close connection after response
             client.println(); // Blank line signals end of headers
-
             client.println(F("<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"));
             client.println(F("<style>"));
             client.println(F("body{font-family:Helvetica, Arial, sans-serif;margin:0;padding:0;background-color:#f8f8f8;color:#333;}"));
@@ -580,8 +595,41 @@ void loop() {
             client.println(F("p.feedback[style*='color:green'] { background-color: #e6ffe6; border-color: #00cc00;}"));
             client.println(F("p.feedback[style*='color:red'] { background-color: #ffe6e6; border-color: #cc0000;}"));
             client.println(F("p.feedback[style*='color:orange'] { background-color: #fff8e6; border-color: #ff9900;}"));
-            client.println(F("</style></head><body>"));
 
+            // --- Updated Styles for detected nodes container (fixed position) ---
+            client.println(F(".detected-nodes-container {"));
+            client.println(F("  position: fixed;")); // Fixed position
+            client.println(F("  top: 10px;")); // 10px from the top
+            client.println(F("  right: 10px;")); // 10px from the right
+            client.println(F("  width: 180px; /* Fixed width for the box */"));
+            client.println(F("  max-height: 150px; /* Max height for scrolling */"));
+            client.println(F("  overflow-y: auto;"));
+            client.println(F("  border: 1px solid #ddd;"));
+            client.println(F("  padding: 8px;")); // Adjusted padding
+            client.println(F("  border-radius: 8px;")); // More rounded corners
+            client.println(F("  background-color: #ffffff; /* White background */"));
+            client.println(F("  box-shadow: 0 4px 8px rgba(0,0,0,0.1); /* Subtle shadow */"));
+            client.println(F("  z-index: 1000; /* Ensure it stays on top */"));
+            client.println(F("}"));
+            client.println(F(".detected-nodes-title {"));
+            client.println(F("  font-size: 0.85em;")); // Slightly larger title
+            client.println(F("  font-weight: bold;"));
+            client.println(F("  color: #333;")); // Darker color for title
+            client.println(F("  margin-bottom: 8px;")); // More margin below title
+            client.println(F("  text-align: center;"));
+            client.println(F("}"));
+            client.println(F(".detected-node-item {"));
+            client.println(F("  font-size: 0.7em;")); // Slightly smaller item font
+            client.println(F("  color: #666;")); // Medium grey for items
+            client.println(F("  margin: 2px 0;"));
+            client.println(F("  text-align: center;"));
+            client.println(F("}"));
+            client.println(F("/* Main content wrapper to prevent overlap with fixed element */"));
+            client.println(F(".main-content {"));
+            client.println(F("  margin-right: 200px; /* Width of fixed box + desired gap */"));
+            client.println(F("  padding-top: 10px; /* Small padding at the top */"));
+            client.println(F("}"));
+            client.println(F("</style></head><body>"));
             client.println(F("<header>"));
             client.println(F("<h1>Protest Information Node</h1>"));
             client.println(F("<p>This node is part of a mesh network. Information may be delayed.</p>"));
@@ -590,6 +638,12 @@ void loop() {
             client.printf("<p class='info-line'><strong>IP:</strong> %s | <strong>MAC:</strong> %s</p>", IP.toString().c_str(), MAC_suffix_str.c_str());
             client.println(F("</header>"));
 
+            // NEW: Display detected nodes subtly within a scrollable container (fixed position)
+            client.println(F("<div class='detected-nodes-container'>"));
+            client.print(detectedNodesHtmlContent);
+            client.println(F("</div>"));
+            
+            client.println(F("<div class='main-content'>")); // Start of main content wrapper
             // Display feedback message from server processing
             if (webFeedbackMessage.length() > 0) {
               client.println(webFeedbackMessage);
@@ -614,7 +668,7 @@ void loop() {
             client.println(F("</form>"));
             client.println(F("</details>"));
             // --- End Collapsible Text input form ---
-
+            client.println(F("</div>")); // End of main content wrapper
             client.println(F("</body></html>"));
             break; // Exit while loop after sending response
           } else { // Reading HTTP headers
@@ -644,7 +698,6 @@ void loop() {
     esp_now_message_t userEspNowMessage;
     // Clear the struct to ensure all bytes are zero, especially the content buffer
     memset(&userEspNowMessage, 0, sizeof(esp_now_message_t)); 
-
     userEspNowMessage.messageID = esp_random(); // Still generated for deduplication
     uint8_t selfMac[6];
     // Convert our own MAC_full_str to bytes
@@ -662,19 +715,15 @@ void loop() {
     // User-sent messages now indicate they are from "User via Node [MAC suffix]"
     // Formatted string WITHOUT messageID or TTL
     String messageToSendFormatted = "User via Node " + MAC_suffix_str + " - " + userMessageBuffer;
-
     // Add to seen messages cache immediately, storing the full message for potential re-broadcast
     addOrUpdateMessageToSeen(userEspNowMessage.messageID, userEspNowMessage.originalSenderMac, userEspNowMessage);
 
     // Prepend new messages to serialBuffer (most recent on top) and send via ESP-NOW
     serialBuffer = messageToSendFormatted + "\n" + serialBuffer; // Prepend here
     Serial.println("Broadcasting (User): " + messageToSendFormatted);
-
     if (serialBuffer.length() > 4000) // Keep buffer manageable
       serialBuffer = serialBuffer.substring(0, 4000); // Truncate from the end
-
     sendToAllPeers(userEspNowMessage); // Broadcast the message
-
 #if USE_DISPLAY
     if (displayActive) displayLastLines(22);
 #endif
@@ -690,7 +739,6 @@ void displayLastLines(int numLines) {
   tft.setTextColor(TFT_CYAN);      tft.println("MAC: " + MAC_full_str); // Full MAC on display
   tft.setTextColor(TFT_GREEN);     tft.println("IP: " + IP.toString());
   tft.setTextColor(TFT_WHITE);     tft.println("----------------------");
-
   // Since serialBuffer has most recent on top, we just print from the beginning
   int linesPrinted = 0;
   int lineStart = 0;
