@@ -1,4 +1,4 @@
-This is not quite usable at the time of this writing. 6/19/25.
+This is a working prototype without encryption and a reduced but still real echo problem. 6/22/25.
 
 Project Goals:
 Produce a secure way to spread information in high human density conditions. 
