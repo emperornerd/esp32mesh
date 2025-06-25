@@ -1,0 +1,152 @@
+AI generated. Not fully proofed as of 6/24/25. - Repo Author
+
+Here are step-by-step instructions for a typical user to flash the ESP32 mesh node code onto their ESP32 board. This guide assumes you are using the Arduino IDE, which is a common environment for ESP32 development.
+
+Prerequisites
+Before you start, make sure you have the following:
+
+ESP32 Development Board: Any ESP32 board (e.g., ESP32-DevKitC, ESP32 WROOM-32) with a micro-USB cable.
+
+Computer: A desktop or laptop running Windows, macOS, or Linux.
+
+Internet Connection: Required for downloading software and libraries.
+
+Step 1: Install Arduino IDE
+If you don't already have it, download and install the Arduino IDE:
+
+Go to the official Arduino website: https://www.arduino.cc/en/software
+
+Download the installer appropriate for your operating system.
+
+Follow the installation prompts to complete the setup.
+
+Step 2: Add ESP32 Board Manager URL to Arduino IDE
+The Arduino IDE needs to know how to work with ESP32 boards.
+
+Open the Arduino IDE.
+
+Go to File > Preferences (or Arduino > Preferences on macOS).
+
+In the "Additional Boards Manager URLs" field, paste the following URL:
+
+https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+
+If there are already URLs, separate them with a comma.
+
+Click OK.
+
+Step 3: Install ESP32 Boards
+Now, install the ESP32 board definitions using the Boards Manager:
+
+Go to Tools > Board > Boards Manager...
+
+In the Boards Manager search bar, type esp32.
+
+Locate "esp32 by Espressif Systems" and click Install. This may take a few minutes to download and install.
+
+Close the Boards Manager once the installation is complete.
+
+Step 4: Select Your ESP32 Board
+After installing the board definitions, select your specific ESP32 board.
+
+Connect your ESP32 board to your computer using a micro-USB cable.
+
+Go to Tools > Board > ESP32 Arduino.
+
+Select your specific ESP32 board model (e.g., "ESP32 Dev Module", "ESP32 WROOM Module"). If you're unsure, "ESP32 Dev Module" is often a good default.
+
+Go to Tools > Port and select the serial port connected to your ESP32. This will vary depending on your system (e.g., COM3 on Windows, /dev/cu.SLAB_USBtoUART on macOS, /dev/ttyUSB0 on Linux).
+
+Step 5: Install Required Libraries
+The provided code uses specific libraries.
+
+Go to Sketch > Include Library > Manage Libraries...
+
+In the Library Manager search bar, search for TFT_eSPI.
+
+Locate "TFT_eSPI by Bodmer" and click Install. (Note: The code uses #define USE_DISPLAY true, so this library is required. If you do not have a TFT display, you could comment out or change USE_DISPLAY to false in the code later, but it's good to install it for now.)
+
+Close the Library Manager.
+
+Important Note for DNS Server: The code also explicitly requires DNSServer.h. This library is typically included with the ESP32 core, so you shouldn't need to install it separately via the Library Manager. If you encounter an error related to DNSServer.h, ensure your ESP32 board installation (Step 3) was successful.
+
+Step 6: Prepare the Code
+The code you have is likely in a raw text format.
+
+Copy all the C++ code from your code_canvas immersive.
+
+In the Arduino IDE, go to File > New to open a new sketch.
+
+Delete any existing code in the new sketch window and paste the copied code into it.
+
+Save the sketch. Go to File > Save As... and create a new folder with the same name as the sketch file (e.g., esp32_mesh_node) and save the .ino file inside it.
+
+Step 7: Configure Trusted MAC Addresses (Crucial!)
+The code has a section for trustedMACs. You must update this with the actual MAC addresses of all ESP32 nodes you intend to use in your mesh network.
+
+Find your ESP32's MAC Address:
+
+For the ESP32 you are about to flash: Open a new sketch in Arduino IDE, paste the following code, upload it, and open the Serial Monitor (Tools > Serial Monitor).
+
+#include <WiFi.h>
+void setup() {
+  Serial.begin(115200);
+  Serial.print("ESP32 MAC Address: ");
+  Serial.println(WiFi.macAddress());
+}
+void loop() {}
+
+Note down the MAC address (e.g., 14:33:5C:06:3A:99). Repeat this for all your ESP32 boards.
+
+Update trustedMACs in your main code:
+
+In the main ESP32 mesh node code you pasted in Step 6, find the const uint8_t trustedMACs[][6] = { ... } section.
+
+Replace the example MAC addresses with your actual MAC addresses, formatted as hex bytes.
+
+Example: If your MAC is 14:33:5C:06:3A:99, it becomes {0x14, 0x33, 0x5C, 0x06, 0x3A, 0x99}.
+
+Ensure numTrusted (calculated automatically) is correct based on the number of MACs you've listed.
+
+Example (after modification):
+
+const uint8_t trustedMACs[][6] = {
+  {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF},    // Your first ESP32's MAC
+  {0x01, 0x23, 0x45, 0x67, 0x89, 0xAB},    // Your second ESP32's MAC
+  {0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x23}     // Your third ESP32's MAC
+  // Add more if you have them
+};
+
+Crucial: All ESP32s in your mesh must have the same trustedMACs array for proper communication and re-broadcasting.
+
+Step 8: Upload the Code
+Finally, upload the code to your ESP32 board.
+
+In the Arduino IDE, click the Upload button (right arrow icon) in the toolbar.
+
+The Arduino IDE will compile the code and then attempt to upload it to your ESP32.
+
+If uploading fails: You might need to put your ESP32 into "flashing mode".
+
+Hold down the BOOT (or FLASH) button on your ESP32 board.
+
+While holding BOOT, press the EN (or RESET) button once, then release EN.
+
+Continue holding BOOT.
+
+Click the Upload button in the Arduino IDE.
+
+Once the upload starts (you'll see "Connecting..." and then progress percentages), you can release the BOOT button.
+
+If the upload is successful, you will see "Done uploading." in the status bar.
+
+Step 9: Monitor the ESP32 (Optional but Recommended)
+You can view the serial output from your ESP32 to see its activity.
+
+In the Arduino IDE, go to Tools > Serial Monitor.
+
+Ensure the baud rate is set to 115200 (matching Serial.begin(115200) in the code).
+
+You should see messages indicating the node starting, its MAC address, IP, and received/sent messages.
+
+Repeat these steps for all ESP32 boards you want to be part of your mesh network, ensuring each is flashed with the same code and the complete list of trusted MAC addresses.
