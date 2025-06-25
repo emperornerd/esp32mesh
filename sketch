@@ -56,7 +56,7 @@ int counter = 1;
 // Message content size should be 240 bytes (max 250 bytes - 10 for ID/MAC/TTL).
 // If you change content size, update MAX_MESSAGE_CONTENT_LEN
 #define MAX_MESSAGE_CONTENT_LEN 239 // 250 (max ESP-NOW) - 4 (ID) - 6 (MAC) - 1 (TTL) = 239
-#define MAX_TTL_HOPS 20 // Maximum Time-To-Live (hops) for a message (Changed from 25 to 20)
+#define MAX_TTL_HOPS 40 // Maximum Time-To-Live (hops) for a message (Increased for larger mesh)
 
 typedef struct __attribute__((packed)) {
   uint32_t messageID;         // Unique ID for the message
@@ -80,14 +80,19 @@ std::vector<SeenMessage> seenMessages;
 portMUX_TYPE seenMessagesMutex = portMUX_INITIALIZER_UNLOCKED;
 
 // Increased cache duration significantly
+// This defines how long a message stays in the cache to prevent duplicates.
 const unsigned long DEDUP_CACHE_DURATION_MS = 600000; // 10 minutes
-const size_t MAX_CACHE_SIZE = 50; // Max number of messages to keep in cache
+// Max number of messages to keep in cache. Prevents memory exhaustion on the ESP32.
+const size_t MAX_CACHE_SIZE = 50; 
 
 // New: Interval for periodic re-broadcasting of old messages from cache
-// Re-broadcast will be 2.5 minutes (150s) +/- 30 seconds (30s) = 120s to 180s
-const unsigned long REBROADCAST_CENTER_MS = 150000; // 2.5 minutes
-const unsigned long REBROADCAST_RANDOM_RANGE_MS = 30000; // +/- 30 seconds
-const unsigned long REBROADCAST_MIN_AGE_MS = 30000; // Only re-broadcast messages older than 30 seconds
+// This is critical for synchronization. Shorter times mean faster catch-up for re-connected nodes.
+// Re-broadcast will be 4 minutes (240s) +/- 1 minute (60s) = 3 minutes to 5 minutes
+const unsigned long REBROADCAST_CENTER_MS = 240000; // 4 minutes (was 1.5 minutes)
+const unsigned long REBROADCAST_RANDOM_RANGE_MS = 60000; // +/- 1 minute (was +/- 20 seconds)
+// Minimum age before a message is eligible for re-broadcasting.
+// Shorter means messages are re-broadcasted sooner after being seen.
+const unsigned long REBROADCAST_MIN_AGE_MS = 60000; // 1 minute (was 15 seconds)
 
 // --- FreeRTOS Queue for message processing ---
 QueueHandle_t messageQueue;
@@ -533,11 +538,20 @@ void loop() {
                 webFeedbackMessage = "<p class='feedback' style='color:green;'>Message queued for sending!</p>" + webFeedbackMessage; // Append any previous feedback
                 Serial.println("User message received from web: " + userMessageBuffer);
               }
+
+              // --- IMPLEMENT POST/REDIRECT/GET (PRG) PATTERN ---
+              // Send a 303 See Other redirect to the same URL.
+              // This prevents duplicate submissions if the user refreshes or uses back/forward.
+              client.println(F("HTTP/1.1 303 See Other"));
+              client.println(F("Location: /")); // Redirect to the root path
+              client.println(F("Connection: close"));
+              client.println(); // End of headers
+              client.stop(); // Close the connection
+              return; // Crucially, exit function after redirecting
             } // End if (isPost)
 
             // --- Gather unique seen MACs for display (most recent four) ---
-            // Use a map to store the most recent timestamp for each unique MAC.
-            // Keys are full MAC strings, values are timestamps.
+            // This part is for GET requests only, as POST now redirects
             std::map<String, unsigned long> uniqueRecentMacsMap; 
 
             portENTER_CRITICAL(&seenMessagesMutex); // Lock while accessing seenMessages
@@ -591,7 +605,7 @@ void loop() {
             detectedNodesHtmlContent += "</div>"; // Close recent-senders-display-wrapper
 
 
-            // --- Send HTTP Response (always send the page back) ---
+            // --- Send HTTP Response for GET request ---
             client.println(F("HTTP/1.1 200 OK"));
             client.println(F("Content-type:text/html"));
             client.println(F("Connection: close")); // Close connection after response
@@ -662,7 +676,7 @@ void loop() {
             client.println(F("  padding: 10px 15px;"));
             client.println(F("  font-size: 0.75em; /* Smaller font */"));
             client.println(F("  color: #0056b3; /* Darker blue text */"));
-            client.println(F("  margin: 15px auto; /* Center this block horizontally */")); // Changed margin-top to margin auto
+            client.println(F("  margin: 15px auto; /* Center this block horizontally */")); 
             client.println(F("}"));
 
             client.println(F(".detected-nodes-label {"));
@@ -683,9 +697,6 @@ void loop() {
             client.println(F("  /* No specific background or padding, just text style */"));
             client.println(F("}"));
             
-            // No specific media queries for the header or recent senders needed anymore.
-            // The responsive behavior is handled by default flex/block model.
-
             client.println(F("</style></head><body>"));
             client.println(F("<header>"));
             client.println(F("<h1>Protest Information Node</h1>"));
