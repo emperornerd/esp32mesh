@@ -6,6 +6,7 @@
 #include <string.h>   // For strncpy and memset
 #include <set>        // For storing unique MACs for display (used for logic to pick 4 unique)
 #include <map>        // For storing unique MACs with their last seen timestamp for sorting
+#include <DNSServer.h> // REQUIRED: Include for DNS server functionality
 
 #define USE_DISPLAY true
 
@@ -35,7 +36,7 @@ const int numTrusted = sizeof(trustedMACs) / sizeof(trustedMACs[0]);
 const int WIFI_CHANNEL = 1;
 
 WiFiServer server(80);
-IPAddress IP;
+IPAddress IP; // This will store the actual IP of the SoftAP (192.168.4.1)
 String MAC_full_str; // Full MAC address of this ESP32 (e.g., "AA:BB:CC:DD:EE:FF")
 String MAC_suffix_str; // Last 4 chars of our MAC (e.g., "EEFF")
 String ssid; // Our unique SSID
@@ -49,6 +50,13 @@ unsigned long lastRebroadcast = 0; // Timestamp for last re-broadcast
 unsigned long nextRebroadcastInterval = 0; // Stores the next random re-broadcast interval
 
 int counter = 1;
+
+// REQUIRED: Define the static IP address for the SoftAP and DNS server
+IPAddress apIP(192, 168, 4, 1);
+IPAddress netMsk(255, 255, 255, 0);
+
+// REQUIRED: DNS server object
+DNSServer dnsServer;
 
 // --- Message Structure for ESP-NOW and Deduplication ---
 // This struct will be used to send and receive messages,
@@ -304,11 +312,18 @@ void setup() {
   MAC_suffix_str = macCleanForSuffix.substring(macCleanForSuffix.length() - 4);
   ssid = "ProtestInfo_" + MAC_suffix_str;
 
+  // REQUIRED: Configure SoftAP with static IP, Gateway, and DNS (which is its own IP)
+  WiFi.softAPConfig(apIP, apIP, netMsk); 
   // Step 2: Configure the actual SoftAP with the unique SSID and the chosen channel.
   // This is the definitive setting for the SoftAP channel.
   WiFi.softAP(ssid.c_str(), nullptr, WIFI_CHANNEL);
-  IP = WiFi.softAPIP(); // Get the IP address of our AP
+  IP = WiFi.softAPIP(); // Get the IP address of our AP (should be apIP)
   server.begin(); // Start the web server
+
+  // REQUIRED: Start DNS server, redirecting all requests to apIP
+  dnsServer.start(53, "*", apIP);
+  Serial.println("DNS server started, redirecting all domains to: " + apIP.toString());
+
 
   // Step 3: Crucially, ensure the underlying Wi-Fi station interface (used by ESP-NOW)
   // is also locked to the same channel. This helps avoid internal channel conflicts.
@@ -360,6 +375,9 @@ void setup() {
 }
 
 void loop() {
+  // REQUIRED: Process DNS requests
+  dnsServer.processNextRequest();
+
   // --- Process Incoming Messages from Queue ---
   esp_now_message_t receivedMessage;
   while (xQueueReceive(messageQueue, &receivedMessage, 0) == pdPASS) {
