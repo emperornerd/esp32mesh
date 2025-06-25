@@ -4,7 +4,8 @@
 #include <vector>     // For dynamic array for the cache
 #include <algorithm>  // For std::remove_if, std::min_element, std::sort
 #include <string.h>   // For strncpy and memset
-#include <set>        // For storing unique MACs for display
+#include <set>        // For storing unique MACs for display (used for logic to pick 4 unique)
+#include <map>        // For storing unique MACs with their last seen timestamp for sorting
 
 #define USE_DISPLAY true
 
@@ -535,33 +536,59 @@ void loop() {
             } // End if (isPost)
 
             // --- Gather unique seen MACs for display (most recent four) ---
-            std::vector<SeenMessage> recentSeenMessages;
+            // Use a map to store the most recent timestamp for each unique MAC.
+            // Keys are full MAC strings, values are timestamps.
+            std::map<String, unsigned long> uniqueRecentMacsMap; 
+
             portENTER_CRITICAL(&seenMessagesMutex); // Lock while accessing seenMessages
-            // Copy relevant parts for sorting to a temporary vector
+            // Populate the map with the latest timestamp for each unique MAC
             for (const auto& seenMsg : seenMessages) {
-                recentSeenMessages.push_back(seenMsg); // Copy entire struct for sorting
+                String fullMacStr = formatMac(seenMsg.originalSenderMac);
+                // If MAC not in map, or new timestamp is more recent, update it
+                if (uniqueRecentMacsMap.find(fullMacStr) == uniqueRecentMacsMap.end() || 
+                    seenMsg.timestamp > uniqueRecentMacsMap[fullMacStr]) {
+                    uniqueRecentMacsMap[fullMacStr] = seenMsg.timestamp;
+                }
             }
             portEXIT_CRITICAL(&seenMessagesMutex); // Unlock
 
+            // Now, transfer map contents to a vector of pairs for sorting
+            std::vector<std::pair<String, unsigned long>> sortedUniqueMacs;
+            for (auto const& [macStr, timestamp] : uniqueRecentMacsMap) {
+                sortedUniqueMacs.push_back({macStr, timestamp});
+            }
+
             // Sort by timestamp in descending order (most recent first)
-            std::sort(recentSeenMessages.begin(), recentSeenMessages.end(),
-                      [](const SeenMessage& a, const SeenMessage& b) {
-                          return a.timestamp > b.timestamp; // Descending order
+            std::sort(sortedUniqueMacs.begin(), sortedUniqueMacs.end(),
+                      [](const std::pair<String, unsigned long>& a, const std::pair<String, unsigned long>& b) {
+                          return a.second > b.second; // Descending order of timestamp
                       });
 
             String detectedNodesHtmlContent = "";
-            detectedNodesHtmlContent += "<p class='detected-nodes-title'>Detected Original Senders:</p>";
-            // Take up to the most recent 4
+            detectedNodesHtmlContent += "<div class='recent-senders-display-wrapper'>"; 
+            detectedNodesHtmlContent += "<span class='detected-nodes-label'>Senders:</span>"; 
+            detectedNodesHtmlContent += "<div class='detected-nodes-mac-list'>"; 
+            // Take up to the most recent 4 unique MACs
             int count = 0;
-            for (const auto& seenMsg : recentSeenMessages) {
-                if (count >= 4) break; // Limit to 4
-                detectedNodesHtmlContent += "<p class='detected-node-item'>" + formatMaskedMac(seenMsg.originalSenderMac) + "</p>";
+            for (const auto& macPair : sortedUniqueMacs) {
+                if (count >= 4) break; // Limit to 4 unique MACs
+                
+                // Convert the full MAC string (from macPair.first) back to bytes to mask for display
+                uint8_t macBytes[6];
+                sscanf(macPair.first.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", 
+                       (unsigned int*)&macBytes[0], (unsigned int*)&macBytes[1], 
+                       (unsigned int*)&macBytes[2], (unsigned int*)&macBytes[3], 
+                       (unsigned int*)&macBytes[4], (unsigned int*)&macBytes[5]);
+
+                detectedNodesHtmlContent += "<span class='detected-node-item-compact'>" + formatMaskedMac(macBytes) + "</span>";
                 count++;
             }
             // If empty, add a placeholder
             if (count == 0) {
-                detectedNodesHtmlContent += "<p class='detected-node-item'>None detected yet</p>";
+                detectedNodesHtmlContent += "<span class='detected-node-item-compact'>None</span>";
             }
+            detectedNodesHtmlContent += "</div>"; // Close detected-nodes-mac-list
+            detectedNodesHtmlContent += "</div>"; // Close recent-senders-display-wrapper
 
 
             // --- Send HTTP Response (always send the page back) ---
@@ -570,16 +597,42 @@ void loop() {
             client.println(F("Connection: close")); // Close connection after response
             client.println(); // Blank line signals end of headers
             client.println(F("<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"));
+            client.println(F("<title>Protest Info Node</title>")); // Added title for browser tab
             client.println(F("<style>"));
-            client.println(F("body{font-family:Helvetica, Arial, sans-serif;margin:0;padding:0;background-color:#f8f8f8;color:#333;}"));
-            client.println(F("header{background-color:#f0f0f0;padding:10px 0;border-bottom:1px solid #ddd;}"));
+            client.println(F("body{font-family:Helvetica, Arial, sans-serif;margin:0;padding:0;background-color:#f8f8f8;color:#333;display:flex;flex-direction:column;min-height:100vh;}"));
+            
+            // Header: simple centered content
+            client.println(F("header{background-color:#f0f0f0;padding:10px 15px;border-bottom:1px solid #ddd;width:100%;text-align:center;}"));
+            
             client.println(F("h1, h2, h3 {margin:0;padding:5px 0;color:#333;text-align:center;}"));
             client.println(F("h1{font-size:1.4em;}"));
             client.println(F("h2{font-size:1.2em;}"));
             client.println(F("h3{font-size:1.1em;margin-bottom:10px;}"));
             client.println(F("p{margin:3px 0;font-size:0.9em;text-align:center;}"));
             client.println(F(".info-line{font-size:0.8em;color:#666;margin-bottom:10px;}")); // For IP/MAC info
-            client.println(F("pre{background:#eee;padding:10px;border-radius:5px;text-align:left;max-width:90%;margin:15px auto;overflow-x:auto;white-space:pre-wrap;word-wrap:break-word;font-size:0.85em;border:1px solid #ccc;}"));
+            
+            // Flexbox container for main content (always column, no sidebar)
+            client.println(F(".content-wrapper {"));
+            client.println(F("  display: flex;"));
+            client.println(F("  flex-direction: column;"));
+            client.println(F("  align-items: center;"));
+            client.println(F("  width: 100%;"));
+            client.println(F("  max-width: 900px; /* Overall max width for content */"));
+            client.println(F("  margin: 15px auto; /* Center the wrapper and add vertical margin */"));
+            client.println(F("  padding: 0 10px; /* Horizontal padding for wrapper */"));
+            client.println(F("  flex-grow: 1; /* Allow content to grow and fill vertical space */"));
+            client.println(F("}"));
+
+            // Main message log area
+            client.println(F(".chat-main-content {"));
+            client.println(F("  flex: 1; /* Allows it to grow and shrink */"));
+            client.println(F("  width: 100%; /* Full width */"));
+            client.println(F("  max-width: 700px; /* Adjusted max width for chat content to be more central */"));
+            client.println(F("  margin: 0 auto; /* Center the chat content block */"));
+            client.println(F("  background:#fff;padding:15px;border-radius:8px;box-shadow:0 2px 5px rgba(0,0,0,0.1);border:1px solid #ddd;"));
+            client.println(F("}"));
+
+            client.println(F("pre{background:#eee;padding:10px;border-radius:5px;text-align:left;max-width:100%;overflow-x:auto;white-space:pre-wrap;word-wrap:break-word;font-size:0.85em;border:1px solid #ccc;min-height:200px;}"));
             
             // Form specific styles
             client.println(F("details{background:#fff;padding:15px;border-radius:8px;box-shadow:0 2px 5px rgba(0,0,0,0.1);max-width:450px;margin:15px auto;border:1px solid #ddd;}"));
@@ -596,54 +649,53 @@ void loop() {
             client.println(F("p.feedback[style*='color:red'] { background-color: #ffe6e6; border-color: #cc0000;}"));
             client.println(F("p.feedback[style*='color:orange'] { background-color: #fff8e6; border-color: #ff9900;}"));
 
-            // --- Updated Styles for detected nodes container (fixed position) ---
-            client.println(F(".detected-nodes-container {"));
-            client.println(F("  position: fixed;")); // Fixed position
-            client.println(F("  top: 10px;")); // 10px from the top
-            client.println(F("  right: 10px;")); // 10px from the right
-            client.println(F("  width: 180px; /* Fixed width for the box */"));
-            client.println(F("  max-height: 150px; /* Max height for scrolling */"));
-            client.println(F("  overflow-y: auto;"));
-            client.println(F("  border: 1px solid #ddd;"));
-            client.println(F("  padding: 8px;")); // Adjusted padding
-            client.println(F("  border-radius: 8px;")); // More rounded corners
-            client.println(F("  background-color: #ffffff; /* White background */"));
-            client.println(F("  box-shadow: 0 4px 8px rgba(0,0,0,0.1); /* Subtle shadow */"));
-            client.println(F("  z-index: 1000; /* Ensure it stays on top */"));
+            // --- Updated Styles for the compact detected nodes container (now below form) ---
+            client.println(F(".recent-senders-display-wrapper {"));
+            client.println(F("  display: flex;"));
+            client.println(F("  flex-direction: column; /* Stack label and MAC list vertically */"));
+            client.println(F("  align-items: center; /* Center contents */"));
+            client.println(F("  width: 100%; /* Full width within its parent */"));
+            client.println(F("  max-width: 450px; /* Max width to match the form */"));
+            client.println(F("  background: #e6f7ff; /* Light blue background for the bubble */"));
+            client.println(F("  border: 1px solid #cceeff;"));
+            client.println(F("  border-radius: 12px; /* Rounded corners */"));
+            client.println(F("  padding: 10px 15px;"));
+            client.println(F("  font-size: 0.75em; /* Smaller font */"));
+            client.println(F("  color: #0056b3; /* Darker blue text */"));
+            client.println(F("  margin: 15px auto; /* Center this block horizontally */")); // Changed margin-top to margin auto
             client.println(F("}"));
-            client.println(F(".detected-nodes-title {"));
-            client.println(F("  font-size: 0.85em;")); // Slightly larger title
+
+            client.println(F(".detected-nodes-label {"));
             client.println(F("  font-weight: bold;"));
-            client.println(F("  color: #333;")); // Darker color for title
-            client.println(F("  margin-bottom: 8px;")); // More margin below title
-            client.println(F("  text-align: center;"));
+            client.println(F("  margin-bottom: 5px; /* Space below label */"));
+            client.println(F("  color: #003366;"));
             client.println(F("}"));
-            client.println(F(".detected-node-item {"));
-            client.println(F("  font-size: 0.7em;")); // Slightly smaller item font
-            client.println(F("  color: #666;")); // Medium grey for items
-            client.println(F("  margin: 2px 0;"));
-            client.println(F("  text-align: center;"));
+
+            client.println(F(".detected-nodes-mac-list {"));
+            client.println(F("  display: flex;"));
+            client.println(F("  flex-wrap: wrap; /* Allow MACs to wrap */"));
+            client.println(F("  justify-content: center; /* Center MACs if they wrap */"));
+            client.println(F("  gap: 8px; /* Space between individual MAC addresses */"));
+            client.println(F("  width: 100%; /* Ensure flex items fill width for centering */"));
             client.println(F("}"));
-            client.println(F("/* Main content wrapper to prevent overlap with fixed element */"));
-            client.println(F(".main-content {"));
-            client.println(F("  margin-right: 200px; /* Width of fixed box + desired gap */"));
-            client.println(F("  padding-top: 10px; /* Small padding at the top */"));
+
+            client.println(F(".detected-node-item-compact {"));
+            client.println(F("  /* No specific background or padding, just text style */"));
             client.println(F("}"));
+            
+            // No specific media queries for the header or recent senders needed anymore.
+            // The responsive behavior is handled by default flex/block model.
+
             client.println(F("</style></head><body>"));
             client.println(F("<header>"));
             client.println(F("<h1>Protest Information Node</h1>"));
-            client.println(F("<p>This node is part of a mesh network. Information may be delayed.</p>"));
-            
-            // --- Display only the last four HEX characters of the MAC address on the webpage ---
             client.printf("<p class='info-line'><strong>IP:</strong> %s | <strong>MAC:</strong> %s</p>", IP.toString().c_str(), MAC_suffix_str.c_str());
             client.println(F("</header>"));
 
-            // NEW: Display detected nodes subtly within a scrollable container (fixed position)
-            client.println(F("<div class='detected-nodes-container'>"));
-            client.print(detectedNodesHtmlContent);
-            client.println(F("</div>"));
+            // Main content wrapper
+            client.println(F("<div class='content-wrapper'>"));
             
-            client.println(F("<div class='main-content'>")); // Start of main content wrapper
+            client.println(F("<div class='chat-main-content'>")); // Start of main content area
             // Display feedback message from server processing
             if (webFeedbackMessage.length() > 0) {
               client.println(webFeedbackMessage);
@@ -663,12 +715,17 @@ void loop() {
             client.println(F("<input type=\"text\" id=\"message_input\" name=\"message\" placeholder=\"Enter your message here\" required maxlength=\"200\">"));
             client.println(F("<label for=\"password_input\">Password:</label>")); // Added password label
             client.println(F("<input type=\"password\" id=\"password_input\" name=\"password\" placeholder=\"Enter password\" required>")); // Added password input field
-            // Removed the MAC input field entirely
             client.println(F("<input type=\"submit\" value=\"Send Message\">"));
             client.println(F("</form>"));
             client.println(F("</details>"));
             // --- End Collapsible Text input form ---
-            client.println(F("</div>")); // End of main content wrapper
+
+            // --- Recent Senders display, now under the form ---
+            client.print(detectedNodesHtmlContent);
+            
+            client.println(F("</div>")); // End of chat-main-content
+            
+            client.println(F("</div>")); // End of content-wrapper
             client.println(F("</body></html>"));
             break; // Exit while loop after sending response
           } else { // Reading HTTP headers
