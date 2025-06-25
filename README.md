@@ -1,5 +1,3 @@
-This document provides a comprehensive README for the ESP32 Mesh Information Node project, detailing its purpose, features, setup, usage, and configuration.
-
 ESP32 Mesh Information Node
 This project transforms an ESP32 microcontroller into a self-contained, offline mesh communication node. It creates its own Wi-Fi Access Point (SoftAP) to allow users to connect via a web browser and exchange messages that are then propagated across a network of other trusted ESP32 nodes using ESP-NOW. This is designed for scenarios where traditional internet or cellular networks are unavailable, providing a resilient local communication channel.
 
