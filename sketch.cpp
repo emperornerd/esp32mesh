@@ -14,6 +14,11 @@
 #include <TFT_eSPI.h>
 TFT_eSPI tft = TFT_eSPI();
 bool displayActive = false;
+
+// Define the T_IRQ pin explicitly here for direct digitalRead debugging
+// IMPORTANT: This should match your User_Setup.h for your specific board (e.g., ESP32-CYD)
+// Common T_IRQ for CYD: GPIO36 or GPIO39. Please verify your board's pinout.
+#define TFT_TOUCH_IRQ_PIN 36 // Example: Change to 39 if your board uses GPIO39 for T_IRQ
 #endif
 
 // Hard-coded password for web input
@@ -106,9 +111,21 @@ const unsigned long REBROADCAST_MIN_AGE_MS = 60000; // 1 minute (was 15 seconds)
 QueueHandle_t messageQueue;
 #define QUEUE_SIZE 10 // Max messages to queue
 
-// --- FORWARD DECLARATION for displayLastLines ---
+// --- Display Mode Definitions ---
+enum DisplayMode {
+  MODE_CHAT_LOG,
+  MODE_DEVICE_INFO
+};
+DisplayMode currentDisplayMode = MODE_CHAT_LOG; // Start with chat log mode
+
+// --- Touch Debounce for Display Mode Switching ---
+unsigned long lastTouchTime = 0;
+const unsigned long TOUCH_DEBOUNCE_MS = 500; // 500ms debounce
+
+// --- FORWARD DECLARATIONS for display functions ---
 #if USE_DISPLAY
-void displayLastLines(int numLines);
+void displayChatLogMode(int numLines);
+void displayDeviceInfoMode();
 #endif
 // --- END FORWARD DECLARATION ---
 
@@ -279,18 +296,12 @@ void setup() {
   Serial.begin(115200);
   // Initialize random seed for esp_random() and random()
   // Ensure this is called once at startup
-  // Removed: esp_read_mac(NULL,0); // Reads MAC, but also seeds the random number generator on newer ESP-IDF
   randomSeed(analogRead(0)); // Standard Arduino way to seed the random number generator
-  // Note: esp_random() provides cryptographically secure random numbers
-  // and does not need explicit seeding in newer ESP-IDF versions.
-  // We keep randomSeed(analogRead(0)) for general Arduino compatibility and
-  // to ensure good entropy for the 'random' function.
 
   // Create the FreeRTOS message queue
   messageQueue = xQueueCreate(QUEUE_SIZE, sizeof(esp_now_message_t));
   if (messageQueue == NULL) {
     Serial.println("Failed to create message queue!");
-    // Handle error, maybe halt
     while(true) { delay(100); } // Halt if queue creation fails
   }
 
@@ -331,7 +342,7 @@ void setup() {
 
 #if USE_DISPLAY
   tft.begin();
-  tft.setRotation(1); // Adjust for your specific display orientation
+  tft.setRotation(1); // Adjust for your specific display orientation (1 for landscape)
   tft.fillScreen(TFT_BLACK);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
   tft.setTextSize(1);
@@ -339,6 +350,13 @@ void setup() {
   tft.println("Starting node...");
   displayActive = true;
   Serial.println("Display initialized");
+
+  // Initialize the T_IRQ pin for touch detection
+  pinMode(TFT_TOUCH_IRQ_PIN, INPUT_PULLUP); 
+  Serial.printf("T_IRQ pin set to INPUT_PULLUP on GPIO%d\n", TFT_TOUCH_IRQ_PIN);
+
+  // Initial display update
+  displayChatLogMode(22); // Show chat log initially
 #endif
 
   // Initialize ESP-NOW
@@ -380,6 +398,7 @@ void loop() {
 
   // --- Process Incoming Messages from Queue ---
   esp_now_message_t receivedMessage;
+  bool messageProcessed = false; // Flag to indicate if a message was processed
   while (xQueueReceive(messageQueue, &receivedMessage, 0) == pdPASS) {
     // Ensure content is null-terminated before using with String, just in case
     receivedMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0';
@@ -394,9 +413,8 @@ void loop() {
     if (serialBuffer.length() > 4000) // Keep buffer from growing too large
       serialBuffer = serialBuffer.substring(0, 4000); // Take the most recent 4000 chars
     Serial.println("Message received from queue: " + formattedIncoming);
-#if USE_DISPLAY
-    if (displayActive) displayLastLines(22);
-#endif
+    messageProcessed = true; // Set flag
+    
     // Re-broadcast the message to other peers (mesh behavior)
     // Only re-broadcast if TTL is still greater than 0 *before* this node decrements it.
     // The `sendToAllPeers` function will handle the decrement itself.
@@ -457,7 +475,7 @@ void loop() {
       sscanf(MAC_full_str.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", 
              (unsigned int*)&selfMac[0], (unsigned int*)&selfMac[1], 
              (unsigned int*)&selfMac[2], (unsigned int*)&selfMac[3], 
-             (unsigned int*)&selfMac[4], (unsigned int*)&selfMac[5]);
+             (unsigned int*)&selfMac[4], (unsigned int*)&selfMac[5]); 
       memcpy(autoMessage.originalSenderMac, selfMac, 6);
       autoMessage.ttl = MAX_TTL_HOPS; // Initialize TTL for a new message
       
@@ -481,9 +499,7 @@ void loop() {
       if (serialBuffer.length() > 4000) // Keep buffer manageable
         serialBuffer = serialBuffer.substring(0, 4000); // Truncate from the end
       sendToAllPeers(autoMessage); // Send via ESP-NOW
-#if USE_DISPLAY
-    if (displayActive) displayLastLines(22);
-#endif
+      messageProcessed = true; // Set flag
     }
   }
 
@@ -648,7 +664,7 @@ void loop() {
             client.println(F("  display: flex;"));
             client.println(F("  flex-direction: column;"));
             client.println(F("  align-items: center;"));
-            client.println(F("  width: 100%;"));
+            client.println(F("  width: 100%; /* Full width */"));
             client.println(F("  max-width: 900px; /* Overall max width for content */"));
             client.println(F("  margin: 15px auto; /* Center the wrapper and add vertical margin */"));
             client.println(F("  padding: 0 10px; /* Horizontal padding for wrapper */"));
@@ -790,7 +806,7 @@ void loop() {
     sscanf(MAC_full_str.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", 
            (unsigned int*)&selfMac[0], (unsigned int*)&selfMac[1], 
            (unsigned int*)&selfMac[2], (unsigned int*)&selfMac[3], 
-           (unsigned int*)&selfMac[4], (unsigned int*)&selfMac[5]);
+           (unsigned int*)&selfMac[4], (unsigned int*)&selfMac[5]); 
     memcpy(userEspNowMessage.originalSenderMac, selfMac, 6);
     userEspNowMessage.ttl = MAX_TTL_HOPS; // Initialize TTL for a new message
     
@@ -810,20 +826,53 @@ void loop() {
     if (serialBuffer.length() > 4000) // Keep buffer manageable
       serialBuffer = serialBuffer.substring(0, 4000); // Truncate from the end
     sendToAllPeers(userEspNowMessage); // Broadcast the message
-#if USE_DISPLAY
-    if (displayActive) displayLastLines(22);
-#endif
+    messageProcessed = true; // Set flag
     userMessageBuffer = ""; // Clear the buffer after processing
   }
+
+#if USE_DISPLAY
+  // --- Touch Detection and Display Mode Switching ---
+  if (digitalRead(TFT_TOUCH_IRQ_PIN) == LOW && (millis() - lastTouchTime > TOUCH_DEBOUNCE_MS)) {
+    // Touch detected and debounced
+    lastTouchTime = millis();
+    Serial.println("Touch detected! Switching display mode.");
+
+    // Toggle display mode
+    if (currentDisplayMode == MODE_CHAT_LOG) {
+      currentDisplayMode = MODE_DEVICE_INFO;
+    } else {
+      currentDisplayMode = MODE_CHAT_LOG;
+    }
+    // Force a display refresh after mode switch
+    if (currentDisplayMode == MODE_CHAT_LOG) {
+      displayChatLogMode(22);
+    } else {
+      displayDeviceInfoMode();
+    }
+  }
+
+  // Only refresh display if a message was processed or if we're in device info mode
+  // and need to periodically update the seen devices.
+  // For simplicity, we'll just refresh on message processing or mode switch.
+  // A more advanced approach might have a separate timer for device info mode refresh.
+  if (messageProcessed) {
+    if (currentDisplayMode == MODE_CHAT_LOG) {
+      displayChatLogMode(22);
+    }
+    // No need to refresh device info mode here, it refreshes on touch or if a message
+    // was processed and it was the active mode (which is handled by the touch logic).
+  }
+#endif
 }
 
 // Displays the most recent N lines of the serialBuffer on the TFT display
 #if USE_DISPLAY
-void displayLastLines(int numLines) {
+void displayChatLogMode(int numLines) {
   tft.fillScreen(TFT_BLACK);
   tft.setCursor(0, 0);
-  tft.setTextColor(TFT_CYAN);      tft.println("MAC: " + MAC_full_str); // Full MAC on display
-  tft.setTextColor(TFT_GREEN);     tft.println("IP: " + IP.toString());
+  tft.setTextColor(TFT_GREEN);      tft.println("MAC: " + MAC_full_str); // Set MAC to green (purple for user)
+  tft.setTextColor(TFT_GREEN);     tft.println("IP: " + IP.toString()); // Keep IP as green (purple for user)
+  tft.setTextColor(TFT_GREEN);      tft.println("Mode: Chat Log"); // Set Mode to green (purple for user)
   tft.setTextColor(TFT_WHITE);     tft.println("----------------------");
   // Since serialBuffer has most recent on top, we just print from the beginning
   int linesPrinted = 0;
@@ -835,6 +884,71 @@ void displayLastLines(int numLines) {
     tft.println(line);
     lineStart = lineEnd + 1;
     linesPrinted++;
+  }
+}
+
+// Displays device information and nearby detected nodes
+void displayDeviceInfoMode() {
+  tft.fillScreen(TFT_BLACK);
+  tft.setCursor(0, 0);
+  tft.setTextColor(TFT_GREEN);      tft.println("MAC: " + MAC_full_str); // Set MAC to green (purple for user)
+  tft.setTextColor(TFT_GREEN);     tft.println("IP: " + IP.toString()); // Keep IP as green (purple for user)
+  tft.setTextColor(TFT_GREEN);      tft.println("Mode: Device Info"); // Set Mode to green (purple for user)
+  tft.setTextColor(TFT_WHITE);     tft.println("----------------------");
+  tft.println("Nearby Nodes (Last Seen):");
+
+  std::map<String, unsigned long> uniqueRecentMacsMap; 
+  uint8_t selfMac[6];
+  sscanf(MAC_full_str.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", 
+         (unsigned int*)&selfMac[0], (unsigned int*)&selfMac[1], 
+         (unsigned int*)&selfMac[2], (unsigned int*)&selfMac[3], 
+         (unsigned int*)&selfMac[4], (unsigned int*)&selfMac[5]); 
+
+  portENTER_CRITICAL(&seenMessagesMutex); // Lock while accessing seenMessages
+  // Populate the map with the latest timestamp for each unique MAC
+  for (const auto& seenMsg : seenMessages) {
+      // Exclude our own MAC from the list of "nearby nodes"
+      if (memcmp(seenMsg.originalSenderMac, selfMac, 6) != 0) {
+          String fullMacStr = formatMac(seenMsg.originalSenderMac);
+          // If MAC not in map, or new timestamp is more recent, update it
+          if (uniqueRecentMacsMap.find(fullMacStr) == uniqueRecentMacsMap.end() || 
+              seenMsg.timestamp > uniqueRecentMacsMap[fullMacStr]) {
+              uniqueRecentMacsMap[fullMacStr] = seenMsg.timestamp;
+          }
+      }
+  }
+  portEXIT_CRITICAL(&seenMessagesMutex); // Unlock
+
+  std::vector<std::pair<String, unsigned long>> sortedUniqueMacs;
+  for (auto const& [macStr, timestamp] : uniqueRecentMacsMap) {
+      sortedUniqueMacs.push_back({macStr, timestamp});
+  }
+
+  // Sort by timestamp in descending order (most recent first)
+  std::sort(sortedUniqueMacs.begin(), sortedUniqueMacs.end(),
+            [](const std::pair<String, unsigned long>& a, const std::pair<String, unsigned long>& b) {
+                return a.second > b.second; // Descending order of timestamp
+            });
+
+  int linesPrinted = 0;
+  // Display up to 15 nearby nodes (adjust as needed for screen size)
+  const int MAX_NODES_TO_DISPLAY = 15; 
+  if (sortedUniqueMacs.empty()) {
+    tft.println("  No other nodes detected yet.");
+  } else {
+    for (const auto& macPair : sortedUniqueMacs) {
+        if (linesPrinted >= MAX_NODES_TO_DISPLAY) break;
+        uint8_t macBytes[6];
+        sscanf(macPair.first.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", 
+               (unsigned int*)&macBytes[0], (unsigned int*)&macBytes[1], 
+               (unsigned int*)&macBytes[2], (unsigned int*)&macBytes[3], 
+               (unsigned int*)&macBytes[4], (unsigned int*)&macBytes[5]);
+        
+        tft.printf("  %s (seen %lu s ago)\n", 
+                   formatMaskedMac(macBytes).c_str(), 
+                   (millis() - macPair.second) / 1000);
+        linesPrinted++;
+    }
   }
 }
 #endif
