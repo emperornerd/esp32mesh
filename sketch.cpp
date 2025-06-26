@@ -55,7 +55,11 @@ String serialBuffer = "";         // Stores messages, most recent on top
 String userMessageBuffer = "";  // To hold the user-entered message from POST
 String webFeedbackMessage = ""; // To send messages back to the web client (e.g., success/error)
 
-// Removed lastUpdate as auto message is now only sent once at startup
+// Global counters for statistics
+unsigned long totalMessagesSent = 0;
+unsigned long totalMessagesReceived = 0;
+unsigned long totalUrgentMessages = 0;
+
 unsigned long lastRebroadcast = 0; // Timestamp for last re-broadcast
 unsigned long nextRebroadcastInterval = 0; // Stores the next random re-broadcast interval
 
@@ -105,9 +109,9 @@ const size_t MAX_CACHE_SIZE = 50;
 
 // New: Interval for periodic re-broadcasting of old messages from cache
 // This is critical for synchronization. Shorter times mean faster catch-up for re-connected nodes.
-// Re-broadcast will be 4 minutes (240s) +/- 1 minute (60s) = 3 minutes to 5 minutes
-const unsigned long REBROADCAST_CENTER_MS = 240000; // 4 minutes (was 1.5 minutes)
-const unsigned long REBROADCAST_RANDOM_RANGE_MS = 60000; // +/- 1 minute (was +/- 20 seconds)
+// Re-broadcast will be 2 minutes (120s) +/- 30 seconds (30s) = 1.5 minutes to 2.5 minutes
+const unsigned long REBROADCAST_CENTER_MS = 120000; // 2 minutes
+const unsigned long REBROADCAST_RANDOM_RANGE_MS = 30000; // +/- 30 seconds
 // Minimum age before a message is eligible for re-broadcasting.
 // Shorter means messages are re-broadcasted sooner after being seen.
 const unsigned long REBROADCAST_MIN_AGE_MS = 60000; // 1 minute (was 15 seconds)
@@ -119,7 +123,9 @@ QueueHandle_t messageQueue;
 // --- Display Mode Definitions ---
 enum DisplayMode {
   MODE_CHAT_LOG,
-  MODE_DEVICE_INFO
+  MODE_URGENT_ONLY, // New mode for urgent messages
+  MODE_DEVICE_INFO,
+  MODE_STATS_INFO // New mode for statistics
 };
 DisplayMode currentDisplayMode = MODE_CHAT_LOG; // Start with chat log mode
 
@@ -130,7 +136,9 @@ const unsigned long TOUCH_DEBOUNCE_MS = 500; // 500ms debounce
 // --- FORWARD DECLARATIONS for display functions ---
 #if USE_DISPLAY
 void displayChatLogMode(int numLines);
+void displayUrgentOnlyMode(int numLines); // New forward declaration
 void displayDeviceInfoMode();
+void displayStatsInfoMode(); // New forward declaration
 #endif
 // --- END FORWARD DECLARATION ---
 
@@ -241,6 +249,12 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
   
   // Add to seen messages cache immediately (including its data for potential future re-broadcast)
   addOrUpdateMessageToSeen(incomingMessage.messageID, incomingMessage.originalSenderMac, incomingMessage);
+
+  // Increment total messages received
+  totalMessagesReceived++;
+  if (String(incomingMessage.content).startsWith("Urgent: ")) {
+      totalUrgentMessages++;
+  }
 
   // --- TTL Check ---
   // Only process and potentially re-broadcast if TTL is greater than 0
@@ -415,6 +429,7 @@ void setup() {
   // Prepend new messages to buffer (most recent on top)
   serialBuffer = formattedMessage + "\n" + serialBuffer; // Prepend here
   Serial.println("Sending (Auto): " + formattedMessage);
+  totalMessagesSent++; // Increment total messages sent
   counter++; // Increment counter for future potential use, though only one auto message is sent
   if (serialBuffer.length() > 4000) // Keep buffer manageable
     serialBuffer = serialBuffer.substring(0, 4000); // Truncate from the end
@@ -439,7 +454,7 @@ void loop() {
     String incomingContent = String(receivedMessage.content);
     String originalSenderMacSuffix = getMacSuffix(receivedMessage.originalSenderMac); // Use new helper
 
-    // Formatted string WITHOUT messageID or TTL
+    // Formatted string: Always include Node prefix, then the content (which might start with "Urgent: ")
     String formattedIncoming = "Node " + originalSenderMacSuffix + " - " + incomingContent;
     
     // Prepend new messages to buffer (most recent on top)
@@ -530,6 +545,8 @@ void loop() {
               // Parse the POST body for message and password parameters
               String messageParam = "";
               String passwordParam = "";
+              String urgentParam = ""; // Added for urgent checkbox
+
               int messageStart = postBody.indexOf("message=");
               if (messageStart != -1) {
                 int messageEnd = postBody.indexOf('&', messageStart);
@@ -541,6 +558,11 @@ void loop() {
                 int passwordEnd = postBody.indexOf('&', passwordStart);
                 if (passwordEnd == -1) passwordEnd = postBody.length();
                 passwordParam = postBody.substring(passwordStart + 9, passwordEnd);
+              }
+              // Check for urgent parameter
+              int urgentStart = postBody.indexOf("urgent=");
+              if (urgentStart != -1) {
+                urgentParam = "on"; // Checkbox is typically "on" if checked, or absent if not
               }
 
               // --- URL DECODING FOR MESSAGE ---
@@ -564,6 +586,11 @@ void loop() {
               } else if (decodedMessage.length() == 0) {
                 webFeedbackMessage = "<p class='feedback' style='color:orange;'>Please enter a message.</p>";
               } else {
+                // Prepend "Urgent: " if checkbox was checked (removed stars)
+                if (urgentParam == "on") {
+                  decodedMessage = "Urgent: " + decodedMessage;
+                }
+
                 // IMPORTANT: Ensure decodedMessage length doesn't exceed MAX_MESSAGE_CONTENT_LEN - 1
                 if (decodedMessage.length() >= MAX_MESSAGE_CONTENT_LEN) {
                     decodedMessage = decodedMessage.substring(0, MAX_MESSAGE_CONTENT_LEN - 1);
@@ -758,9 +785,14 @@ void loop() {
             client.println(F("<h3>Send a New Message:</h3>")); // Adjusted heading size for form
             client.println(F("<form action=\"/\" method=\"POST\">"));
             client.println(F("<label for=\"message_input\">Message:</label>"));
-            client.println(F("<input type=\"text\" id=\"message_input\" name=\"message\" placeholder=\"Enter your message here\" required maxlength=\"200\">"));
+            client.println(F("<input type=\"text\" id=\"message_input\" name=\"message\" placeholder=\"Enter your message here\" required maxlength=\"226\">")); 
             client.println(F("<label for=\"password_input\">Password:</label>")); // Added password label
             client.println(F("<input type=\"password\" id=\"password_input\" name=\"password\" placeholder=\"Enter password\" required>")); // Added password input field
+            // Added Urgent checkbox
+            client.println(F("<div style=\"display:flex; align-items:center; justify-content:center; width:80%; max-width:350px; margin-bottom:10px;\">"));
+            client.println(F("<input type=\"checkbox\" id=\"urgent_input\" name=\"urgent\" style=\"margin-right: 8px;\">"));
+            client.println(F("<label for=\"urgent_input\" style=\"margin-bottom: 0; align-self: center;\">Urgent</label>"));
+            client.println(F("</div>"));
             client.println(F("<input type=\"submit\" value=\"Send Message\">"));
             client.println(F("</form>"));
             client.println(F("</details>"));
@@ -816,15 +848,21 @@ void loop() {
     strncpy(userEspNowMessage.content, userMessageBuffer.c_str(), MAX_MESSAGE_CONTENT_LEN);
     userEspNowMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0'; // Explicitly ensure null termination
 
-    // User-sent messages now indicate they are from "User via Node [MAC suffix]"
-    // Formatted string WITHOUT messageID or TTL
+    // Increment urgent message count for messages sent by this node if it's urgent
+    if (userMessageBuffer.startsWith("Urgent: ")) { 
+        totalUrgentMessages++; 
+    }
+    
+    // Formatted string: Always include User via Node prefix, then the content (which might start with "Urgent: ")
     String messageToSendFormatted = "User via Node " + MAC_suffix_str + " - " + userMessageBuffer;
+    
     // Add to seen messages cache immediately, storing the full message for potential re-broadcast
     addOrUpdateMessageToSeen(userEspNowMessage.messageID, userEspNowMessage.originalSenderMac, userEspNowMessage);
 
     // Prepend new messages to serialBuffer (most recent on top) and send via ESP-NOW
     serialBuffer = messageToSendFormatted + "\n" + serialBuffer; // Prepend here
     Serial.println("Broadcasting (User): " + messageToSendFormatted);
+    totalMessagesSent++; // Increment total messages sent
     if (serialBuffer.length() > 4000) // Keep buffer manageable
       serialBuffer = serialBuffer.substring(0, 4000); // Truncate from the end
     sendToAllPeers(userEspNowMessage); // Broadcast the message
@@ -839,17 +877,20 @@ void loop() {
     lastTouchTime = millis();
     Serial.println("Touch detected! Switching display mode.");
 
-    // Toggle display mode
+    // Cycle through the four display modes
     if (currentDisplayMode == MODE_CHAT_LOG) {
+      currentDisplayMode = MODE_URGENT_ONLY;
+      displayUrgentOnlyMode(22); // Display urgent messages
+    } else if (currentDisplayMode == MODE_URGENT_ONLY) {
       currentDisplayMode = MODE_DEVICE_INFO;
-    } else {
-      currentDisplayMode = MODE_CHAT_LOG;
+      displayDeviceInfoMode(); // Display device info
+    } else if (currentDisplayMode == MODE_DEVICE_INFO) {
+      currentDisplayMode = MODE_STATS_INFO; // New stats mode
+      displayStatsInfoMode(); // Display stats info
     }
-    // Force a display refresh after mode switch
-    if (currentDisplayMode == MODE_CHAT_LOG) {
-      displayChatLogMode(22);
-    } else {
-      displayDeviceInfoMode();
+    else { // currentDisplayMode == MODE_STATS_INFO
+      currentDisplayMode = MODE_CHAT_LOG;
+      displayChatLogMode(22); // Display all messages
     }
   }
 
@@ -860,6 +901,10 @@ void loop() {
   if (messageProcessed) {
     if (currentDisplayMode == MODE_CHAT_LOG) {
       displayChatLogMode(22);
+    } else if (currentDisplayMode == MODE_URGENT_ONLY) {
+      displayUrgentOnlyMode(22);
+    } else if (currentDisplayMode == MODE_STATS_INFO) { // Refresh stats mode on new message
+      displayStatsInfoMode();
     }
     // No need to refresh device info mode here, it refreshes on touch or if a message
     // was processed and it was the active mode (which is handled by the touch logic).
@@ -874,7 +919,7 @@ void displayChatLogMode(int numLines) {
   tft.setCursor(0, 0);
   tft.setTextColor(TFT_GREEN);      tft.println("MAC: " + MAC_full_str); // Set MAC to green (purple for user)
   tft.setTextColor(TFT_GREEN);     tft.println("IP: " + IP.toString()); // Keep IP as green (purple for user)
-  tft.setTextColor(TFT_GREEN);      tft.println("Mode: Chat Log"); // Set Mode to green (purple for user)
+  tft.setTextColor(TFT_GREEN);      tft.println("Mode: All Messages"); // Updated mode name
   tft.setTextColor(TFT_WHITE);     tft.println("----------------------");
   // Since serialBuffer has most recent on top, we just print from the beginning
   int linesPrinted = 0;
@@ -886,6 +931,31 @@ void displayChatLogMode(int numLines) {
     tft.println(line);
     lineStart = lineEnd + 1;
     linesPrinted++;
+  }
+}
+
+// New function: Displays only urgent messages from the serialBuffer on the TFT display
+void displayUrgentOnlyMode(int numLines) {
+  tft.fillScreen(TFT_BLACK);
+  tft.setCursor(0, 0);
+  tft.setTextColor(TFT_GREEN);      tft.println("MAC: " + MAC_full_str);
+  tft.setTextColor(TFT_GREEN);     tft.println("IP: " + IP.toString());
+  tft.setTextColor(TFT_GREEN);        tft.println("Mode: Urgent Only"); // Changed to green
+  tft.setTextColor(TFT_WHITE);     tft.println("----------------------");
+  
+  int linesPrinted = 0;
+  int lineStart = 0;
+  while (linesPrinted < numLines && lineStart < serialBuffer.length()) {
+    int lineEnd = serialBuffer.indexOf('\n', lineStart);
+    if (lineEnd == -1) lineEnd = serialBuffer.length(); // Last line
+    String line = serialBuffer.substring(lineStart, lineEnd);
+    
+    // Only print the line if it contains "Urgent: " (now it's always preceded by "Node XXXX - ")
+    if (line.indexOf("Urgent: ") != -1) { // Changed to indexOf to find "Urgent: " anywhere in the line
+      tft.println(line);
+      linesPrinted++;
+    }
+    lineStart = lineEnd + 1;
   }
 }
 
@@ -950,5 +1020,39 @@ void displayDeviceInfoMode() {
         linesPrinted++;
     }
   }
+}
+
+// New function: Displays board information and communication statistics
+void displayStatsInfoMode() {
+  tft.fillScreen(TFT_BLACK);
+  tft.setCursor(0, 0);
+  tft.setTextColor(TFT_GREEN);      tft.println("MAC: " + MAC_full_str);
+  tft.setTextColor(TFT_GREEN);     tft.println("IP: " + IP.toString());
+  tft.setTextColor(TFT_GREEN);      tft.println("Mode: Stats Info");
+  tft.setTextColor(TFT_WHITE);     tft.println("----------------------");
+
+  // Calculate uptime
+  unsigned long uptimeMillis = millis();
+  unsigned long seconds = uptimeMillis / 1000;
+  unsigned long minutes = seconds / 60;
+  unsigned long hours = minutes / 60;
+  unsigned long days = hours / 24;
+
+  seconds %= 60;
+  minutes %= 60;
+  hours %= 24;
+
+  tft.println("Uptime:");
+  tft.printf("  Days: %lu\n", days);
+  tft.printf("  Hours: %lu\n", hours);
+  tft.printf("  Minutes: %lu\n", minutes);
+  tft.printf("  Seconds: %lu\n", seconds);
+  tft.println(""); // Blank line for spacing
+
+  tft.println("Message Stats:");
+  tft.printf("  Total Sent: %lu\n", totalMessagesSent);
+  tft.printf("  Total Received: %lu\n", totalMessagesReceived);
+  tft.printf("  Urgent Messages: %lu\n", totalUrgentMessages);
+  tft.printf("  Cache Size: %u/%u\n", seenMessages.size(), MAX_CACHE_SIZE);
 }
 #endif
