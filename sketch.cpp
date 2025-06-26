@@ -7,6 +7,8 @@
 #include <set>        // For storing unique MACs for display (used for logic to pick 4 unique)
 #include <map>        // For storing unique MACs with their last seen timestamp for sorting
 #include <DNSServer.h> // REQUIRED: Include for DNS server functionality
+#include <esp_system.h> // For esp_read_mac
+#include <esp_mac.h>    // For ESP_MAC_WIFI_STA
 
 #define USE_DISPLAY true
 
@@ -46,15 +48,18 @@ String MAC_full_str; // Full MAC address of this ESP32 (e.g., "AA:BB:CC:DD:EE:FF
 String MAC_suffix_str; // Last 4 chars of our MAC (e.g., "EEFF")
 String ssid; // Our unique SSID
 
+// Global variable to store our own MAC address in byte array format for consistency
+uint8_t ourMacBytes[6];
+
 String serialBuffer = "";         // Stores messages, most recent on top
 String userMessageBuffer = "";  // To hold the user-entered message from POST
 String webFeedbackMessage = ""; // To send messages back to the web client (e.g., success/error)
 
-unsigned long lastUpdate = 0;
+// Removed lastUpdate as auto message is now only sent once at startup
 unsigned long lastRebroadcast = 0; // Timestamp for last re-broadcast
 unsigned long nextRebroadcastInterval = 0; // Stores the next random re-broadcast interval
 
-int counter = 1;
+int counter = 1; // Still used for the initial auto message
 
 // REQUIRED: Define the static IP address for the SoftAP and DNS server
 IPAddress apIP(192, 168, 4, 1);
@@ -257,12 +262,9 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
 
 // Sends a message to all trusted ESP-NOW peers
 void sendToAllPeers(esp_now_message_t message) { // Pass by value so we can decrement TTL locally
+  // Use the globally stored SoftAP MAC address for comparison
   uint8_t currentMacBytes[6];
-  // Convert our own MAC_full_str to bytes for comparison
-  sscanf(MAC_full_str.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", 
-           (unsigned int*)&currentMacBytes[0], (unsigned int*)&currentMacBytes[1], 
-           (unsigned int*)&currentMacBytes[2], (unsigned int*)&currentMacBytes[3], 
-           (unsigned int*)&currentMacBytes[4], (unsigned int*)&currentMacBytes[5]);
+  memcpy(currentMacBytes, ourMacBytes, 6);
 
   // --- Decrement TTL before sending ---
   // This is crucial for re-broadcasted messages.
@@ -315,12 +317,16 @@ void setup() {
   // We use the WIFI_CHANNEL constant here from the start.
   WiFi.softAP("placeholder", nullptr, WIFI_CHANNEL);
   delay(100);
-  MAC_full_str = WiFi.softAPmacAddress(); // Get our own full MAC address
+  MAC_full_str = WiFi.softAPmacAddress(); // Get our own full MAC address (SoftAP MAC)
   
-  // Calculate our MAC suffix once at startup
-  String macCleanForSuffix = MAC_full_str;
-  macCleanForSuffix.replace(":", "");
-  MAC_suffix_str = macCleanForSuffix.substring(macCleanForSuffix.length() - 4);
+  // Convert our MAC_full_str (SoftAP MAC) to bytes and store it globally
+  sscanf(MAC_full_str.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X",
+         (unsigned int*)&ourMacBytes[0], (unsigned int*)&ourMacBytes[1],
+         (unsigned int*)&ourMacBytes[2], (unsigned int*)&ourMacBytes[3],
+         (unsigned int*)&ourMacBytes[4], (unsigned int*)&ourMacBytes[5]);
+
+  // Calculate our MAC suffix once at startup from the global ourMacBytes
+  MAC_suffix_str = getMacSuffix(ourMacBytes);
   ssid = "ProtestInfo_" + MAC_suffix_str;
 
   // REQUIRED: Configure SoftAP with static IP, Gateway, and DNS (which is its own IP)
@@ -383,9 +389,37 @@ void setup() {
   // Register the receive callback function
   esp_now_register_recv_cb(onDataRecv);
 
-  // Initialize lastUpdate to ensure first automated message is sent immediately
-  lastUpdate = millis() - 30000; // Trigger immediately for first message
+  // --- Send an auto-generated message once upon initialization ---
+  esp_now_message_t autoMessage;
+  // It's good practice to clear the struct before populating, especially char arrays
+  memset(&autoMessage, 0, sizeof(esp_now_message_t)); 
+  autoMessage.messageID = esp_random(); // Still generated for deduplication
+  // Use the globally stored SoftAP MAC for the original sender
+  memcpy(autoMessage.originalSenderMac, ourMacBytes, 6);
+  autoMessage.ttl = MAX_TTL_HOPS; // Initialize TTL for a new message
   
+  char msgContentBuf[MAX_MESSAGE_CONTENT_LEN]; // Use a temporary buffer for snprintf
+  // Change text to 'Node [last four of mac] initializing'
+  snprintf(msgContentBuf, sizeof(msgContentBuf), "Node %s initializing", MAC_suffix_str.c_str()); 
+  
+  // Copy content from temporary buffer to struct, ensuring null termination
+  strncpy(autoMessage.content, msgContentBuf, sizeof(autoMessage.content));
+  autoMessage.content[sizeof(autoMessage.content) - 1] = '\0'; // Explicitly ensure null termination
+
+  // Formatted string WITHOUT messageID or TTL
+  String formattedMessage = "Node " + MAC_suffix_str + " - " + String(autoMessage.content);
+  // Add to seen messages cache immediately (so we don't process our own broadcast as an incoming message)
+  // Store the full message data for potential re-broadcast later
+  addOrUpdateMessageToSeen(autoMessage.messageID, autoMessage.originalSenderMac, autoMessage);
+
+  // Prepend new messages to buffer (most recent on top)
+  serialBuffer = formattedMessage + "\n" + serialBuffer; // Prepend here
+  Serial.println("Sending (Auto): " + formattedMessage);
+  counter++; // Increment counter for future potential use, though only one auto message is sent
+  if (serialBuffer.length() > 4000) // Keep buffer manageable
+    serialBuffer = serialBuffer.substring(0, 4000); // Truncate from the end
+  sendToAllPeers(autoMessage); // Send via ESP-NOW
+
   // Calculate the first random re-broadcast interval
   nextRebroadcastInterval = random(REBROADCAST_CENTER_MS - REBROADCAST_RANDOM_RANGE_MS,
                                    REBROADCAST_CENTER_MS + REBROADCAST_RANDOM_RANGE_MS + 1); // +1 for upper bound inclusivity
@@ -438,13 +472,9 @@ void loop() {
     for (const auto& seenMsg : seenMessages) {
       // Re-broadcast messages that are old enough, but still have TTL
       // AND are not from this node (to avoid re-broadcasting our own initial messages too frequently)
-      uint8_t selfMac[6];
-      sscanf(MAC_full_str.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", 
-             (unsigned int*)&selfMac[0], (unsigned int*)&selfMac[1], 
-             (unsigned int*)&selfMac[2], (unsigned int*)&selfMac[3], 
-             (unsigned int*)&selfMac[4], (unsigned int*)&selfMac[5]);
+      // Use the globally stored SoftAP MAC for comparison
       if ((currentTime - seenMsg.timestamp) >= REBROADCAST_MIN_AGE_MS && seenMsg.messageData.ttl > 0 &&
-          memcmp(seenMsg.originalSenderMac, selfMac, 6) != 0) {
+          memcmp(seenMsg.originalSenderMac, ourMacBytes, 6) != 0) {
         messagesToRebroadcast.push_back(seenMsg.messageData);
       }
     }
@@ -457,49 +487,6 @@ void loop() {
       // This ensures it stays in the cache for the full DEDUP_CACHE_DURATION_MS from *now*
       // and won't be re-broadcast again until it passes REBROADCAST_MIN_AGE_MS again.
       addOrUpdateMessageToSeen(msg.messageID, msg.originalSenderMac, msg);
-    }
-  }
-
-  // Periodically send an auto-generated message (now immediately and every 30 seconds thereafter)
-  if (millis() - lastUpdate >= 30000) { // Changed from 5000 to 30000 ms
-    lastUpdate = millis();
-    
-    // Only send the automatically generated message if there's no user input pending
-    if (userMessageBuffer.length() == 0) {
-      esp_now_message_t autoMessage;
-      // It's good practice to clear the struct before populating, especially char arrays
-      memset(&autoMessage, 0, sizeof(esp_now_message_t)); 
-      autoMessage.messageID = esp_random(); // Still generated for deduplication
-      uint8_t selfMac[6];
-      // Convert our own MAC_full_str to bytes
-      sscanf(MAC_full_str.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", 
-             (unsigned int*)&selfMac[0], (unsigned int*)&selfMac[1], 
-             (unsigned int*)&selfMac[2], (unsigned int*)&selfMac[3], 
-             (unsigned int*)&selfMac[4], (unsigned int*)&selfMac[5]); 
-      memcpy(autoMessage.originalSenderMac, selfMac, 6);
-      autoMessage.ttl = MAX_TTL_HOPS; // Initialize TTL for a new message
-      
-      char msgContentBuf[MAX_MESSAGE_CONTENT_LEN]; // Use a temporary buffer for snprintf
-      snprintf(msgContentBuf, sizeof(msgContentBuf), "\"Auto Message %d\"", counter);
-      
-      // Copy content from temporary buffer to struct, ensuring null termination
-      strncpy(autoMessage.content, msgContentBuf, sizeof(autoMessage.content));
-      autoMessage.content[sizeof(autoMessage.content) - 1] = '\0'; // Explicitly ensure null termination
-
-      // Formatted string WITHOUT messageID or TTL
-      String formattedMessage = "Node " + MAC_suffix_str + " - " + String(autoMessage.content);
-      // Add to seen messages cache immediately (so we don't process our own broadcast as an incoming message)
-      // Store the full message data for potential re-broadcast later
-      addOrUpdateMessageToSeen(autoMessage.messageID, autoMessage.originalSenderMac, autoMessage);
-
-      // Prepend new messages to buffer (most recent on top)
-      serialBuffer = formattedMessage + "\n" + serialBuffer; // Prepend here
-      Serial.println("Sending (Auto): " + formattedMessage);
-      counter++;
-      if (serialBuffer.length() > 4000) // Keep buffer manageable
-        serialBuffer = serialBuffer.substring(0, 4000); // Truncate from the end
-      sendToAllPeers(autoMessage); // Send via ESP-NOW
-      messageProcessed = true; // Set flag
     }
   }
 
@@ -801,13 +788,8 @@ void loop() {
     // Clear the struct to ensure all bytes are zero, especially the content buffer
     memset(&userEspNowMessage, 0, sizeof(esp_now_message_t)); 
     userEspNowMessage.messageID = esp_random(); // Still generated for deduplication
-    uint8_t selfMac[6];
-    // Convert our own MAC_full_str to bytes
-    sscanf(MAC_full_str.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", 
-           (unsigned int*)&selfMac[0], (unsigned int*)&selfMac[1], 
-           (unsigned int*)&selfMac[2], (unsigned int*)&selfMac[3], 
-           (unsigned int*)&selfMac[4], (unsigned int*)&selfMac[5]); 
-    memcpy(userEspNowMessage.originalSenderMac, selfMac, 6);
+    // Use the globally stored SoftAP MAC for the original sender
+    memcpy(userEspNowMessage.originalSenderMac, ourMacBytes, 6);
     userEspNowMessage.ttl = MAX_TTL_HOPS; // Initialize TTL for a new message
     
     // Copy content from String to char array, ensuring null termination.
@@ -898,17 +880,15 @@ void displayDeviceInfoMode() {
   tft.println("Nearby Nodes (Last Seen):");
 
   std::map<String, unsigned long> uniqueRecentMacsMap; 
-  uint8_t selfMac[6];
-  sscanf(MAC_full_str.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", 
-         (unsigned int*)&selfMac[0], (unsigned int*)&selfMac[1], 
-         (unsigned int*)&selfMac[2], (unsigned int*)&selfMac[3], 
-         (unsigned int*)&selfMac[4], (unsigned int*)&selfMac[5]); 
+  // Use the globally stored SoftAP MAC for comparison
+  uint8_t selfMacBytes[6]; 
+  memcpy(selfMacBytes, ourMacBytes, 6);
 
   portENTER_CRITICAL(&seenMessagesMutex); // Lock while accessing seenMessages
   // Populate the map with the latest timestamp for each unique MAC
   for (const auto& seenMsg : seenMessages) {
       // Exclude our own MAC from the list of "nearby nodes"
-      if (memcmp(seenMsg.originalSenderMac, selfMac, 6) != 0) {
+      if (memcmp(seenMsg.originalSenderMac, selfMacBytes, 6) != 0) {
           String fullMacStr = formatMac(seenMsg.originalSenderMac);
           // If MAC not in map, or new timestamp is more recent, update it
           if (uniqueRecentMacsMap.find(fullMacStr) == uniqueRecentMacsMap.end() || 
