@@ -498,6 +498,7 @@ void loop() {
     bool isPost = false;
     unsigned long clientTimeout = millis(); // Timeout for reading client data
     int contentLength = 0; // To store Content-Length for POST requests
+    String requestedPath = "/"; // Default to root path
 
     // Read the client's request line by line
     while (client.connected() && (millis() - clientTimeout < 2000)) { // Timeout after 2 seconds of inactivity
@@ -507,6 +508,19 @@ void loop() {
         if (c == '\n') {
           // If the current line is blank, we've reached the end of the HTTP headers
           if (currentLine.length() == 0) {
+            // --- CAPTIVE PORTAL REDIRECTION LOGIC ---
+            // If the requested path is not the root ("/") AND it's a GET request,
+            // send a 302 redirect to our main page.
+            if (!isPost && requestedPath != "/") { // Only apply to GET requests
+                Serial.println("Intercepted non-root GET request for: " + requestedPath + ". Redirecting to captive portal.");
+                client.println(F("HTTP/1.1 302 Found"));
+                client.println(F("Location: http://192.168.4.1/")); // Redirect to the main page
+                client.println(F("Connection: close"));
+                client.println(); // End of headers
+                client.stop(); // Close the connection
+                return; // Crucially, exit function after redirecting
+            }
+
             if (isPost) {
               // Read the POST body based on Content-Length (important for proper parsing)
               for (int i = 0; i < contentLength && client.available(); i++) {
@@ -764,6 +778,12 @@ void loop() {
             // Check for GET or POST request method
             if (currentLine.startsWith("GET")) {
               isPost = false;
+              // Extract the path from the GET request line
+              int pathStart = currentLine.indexOf(' ') + 1;
+              int pathEnd = currentLine.indexOf(' ', pathStart);
+              if (pathStart != -1 && pathEnd != -1 && pathEnd > pathStart) {
+                requestedPath = currentLine.substring(pathStart, pathEnd);
+              }
             } else if (currentLine.startsWith("POST")) {
               isPost = true;
             }
