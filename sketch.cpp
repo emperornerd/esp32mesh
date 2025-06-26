@@ -8,7 +8,7 @@
 #include <map>        // For storing unique MACs with their last seen timestamp for sorting
 #include <DNSServer.h> // REQUIRED: Include for DNS server functionality
 #include <esp_system.h> // For esp_read_mac
-#include <esp_mac.h>    // For ESP_MAC_WIFI_STA
+#include <esp_mac.h>    // For ESP_MAC_WIFI_STA // Corrected from esp_mac.g
 
 #define USE_DISPLAY true
 
@@ -114,7 +114,7 @@ const unsigned long REBROADCAST_CENTER_MS = 120000; // 2 minutes
 const unsigned long REBROADCAST_RANDOM_RANGE_MS = 30000; // +/- 30 seconds
 // Minimum age before a message is eligible for re-broadcasting.
 // Shorter means messages are re-broadcasted sooner after being seen.
-const unsigned long REBROADCAST_MIN_AGE_MS = 60000; // 1 minute (was 15 seconds)
+const unsigned long REBROADCAST_MIN_AGE_MS = 15000; // 15 seconds (Changed from 60000)
 
 // --- FreeRTOS Queue for message processing ---
 QueueHandle_t messageQueue;
@@ -546,6 +546,7 @@ void loop() {
               String messageParam = "";
               String passwordParam = "";
               String urgentParam = ""; // Added for urgent checkbox
+              String actionParam = ""; // New: To identify which form was submitted
 
               int messageStart = postBody.indexOf("message=");
               if (messageStart != -1) {
@@ -564,42 +565,87 @@ void loop() {
               if (urgentStart != -1) {
                 urgentParam = "on"; // Checkbox is typically "on" if checked, or absent if not
               }
+              // Check for action parameter
+              int actionStart = postBody.indexOf("action=");
+              if (actionStart != -1) {
+                int actionEnd = postBody.indexOf('&', actionStart);
+                if (actionEnd == -1) actionEnd = postBody.length();
+                actionParam = postBody.substring(actionStart + 7, actionEnd);
+              }
 
-              // --- URL DECODING FOR MESSAGE ---
-              messageParam.replace('+', ' '); // Replace '+' with spaces from URL encoding
-              String decodedMessage = "";
-              for (int i = 0; i < messageParam.length(); i++) {
-                if (messageParam.charAt(i) == '%' && (i + 2) < messageParam.length()) {
-                  // Convert hex to character
-                  char decodedChar = (char)strtol((messageParam.substring(i + 1, i + 3)).c_str(), NULL, 16);
-                  decodedMessage += decodedChar;
-                  i += 2; // Skip the two hex characters
+
+              // --- Handle different form submissions ---
+              if (actionParam == "sendMessage") {
+                // --- URL DECODING FOR MESSAGE ---
+                messageParam.replace('+', ' '); // Replace '+' with spaces from URL encoding
+                String decodedMessage = "";
+                for (int i = 0; i < messageParam.length(); i++) {
+                  if (messageParam.charAt(i) == '%' && (i + 2) < messageParam.length()) {
+                    // Convert hex to character
+                    char decodedChar = (char)strtol((messageParam.substring(i + 1, i + 3)).c_str(), NULL, 16);
+                    decodedMessage += decodedChar;
+                    i += 2; // Skip the two hex characters
+                  } else {
+                    decodedMessage += messageParam.charAt(i);
+                  }
+                }
+                
+                // --- Password Validation and Message Processing ---
+                if (passwordParam != WEB_PASSWORD) {
+                  webFeedbackMessage = "<p class='feedback' style='color:red;'>Incorrect password. Message not sent.</p>";
+                  Serial.println("Incorrect password entered.");
+                } else if (decodedMessage.length() == 0) {
+                  webFeedbackMessage = "<p class='feedback' style='color:orange;'>Please enter a message.</p>";
                 } else {
-                  decodedMessage += messageParam.charAt(i);
-                }
-              }
-              
-              // --- Password Validation and Message Processing ---
-              if (passwordParam != WEB_PASSWORD) {
-                webFeedbackMessage = "<p class='feedback' style='color:red;'>Incorrect password. Message not sent.</p>";
-                Serial.println("Incorrect password entered.");
-              } else if (decodedMessage.length() == 0) {
-                webFeedbackMessage = "<p class='feedback' style='color:orange;'>Please enter a message.</p>";
-              } else {
-                // Prepend "Urgent: " if checkbox was checked (removed stars)
-                if (urgentParam == "on") {
-                  decodedMessage = "Urgent: " + decodedMessage;
-                }
+                  // Prepend "Urgent: " if checkbox was checked
+                  if (urgentParam == "on") {
+                    decodedMessage = "Urgent: " + decodedMessage;
+                  }
 
-                // IMPORTANT: Ensure decodedMessage length doesn't exceed MAX_MESSAGE_CONTENT_LEN - 1
-                if (decodedMessage.length() >= MAX_MESSAGE_CONTENT_LEN) {
-                    decodedMessage = decodedMessage.substring(0, MAX_MESSAGE_CONTENT_LEN - 1);
-                    webFeedbackMessage = "<p class='feedback' style='color:orange;'>Message truncated due to length limit.</p>";
+                  // IMPORTANT: Ensure decodedMessage length doesn't exceed MAX_MESSAGE_CONTENT_LEN - 1
+                  if (decodedMessage.length() >= MAX_MESSAGE_CONTENT_LEN) {
+                      decodedMessage = decodedMessage.substring(0, MAX_MESSAGE_CONTENT_LEN - 1);
+                      webFeedbackMessage = "<p class='feedback' style='color:orange;'>Message truncated due to length limit.</p>";
+                  }
+                  userMessageBuffer = decodedMessage; // Store message for ESP-NOW sending
+                  webFeedbackMessage = "<p class='feedback' style='color:green;'>Message queued for sending!</p>" + webFeedbackMessage; // Append any previous feedback
+                  Serial.println("User message received from web: " + userMessageBuffer);
                 }
-                userMessageBuffer = decodedMessage; // Store message for ESP-NOW sending
-                webFeedbackMessage = "<p class='feedback' style='color:green;'>Message queued for sending!</p>" + webFeedbackMessage; // Append any previous feedback
-                Serial.println("User message received from web: " + userMessageBuffer);
+              } else if (actionParam == "rebroadcastCache") {
+                // --- Password Validation for Re-broadcast Cache ---
+                if (passwordParam != WEB_PASSWORD) {
+                  webFeedbackMessage = "<p class='feedback' style='color:red;'>Incorrect password. Re-broadcast failed.</p>";
+                  Serial.println("Incorrect password entered for re-broadcast.");
+                } else {
+                  unsigned long currentTime = millis();
+                  int rebroadcastedCount = 0;
+                  portENTER_CRITICAL(&seenMessagesMutex); // Lock while iterating/modifying cache
+                  std::vector<esp_now_message_t> messagesToRebroadcast;
+                  for (const auto& seenMsg : seenMessages) {
+                    // Re-broadcast messages that are old enough, but still have TTL
+                    // AND are not from this node (to avoid re-broadcasting our own initial messages too frequently)
+                    // Use the globally stored SoftAP MAC for comparison
+                    if ((currentTime - seenMsg.timestamp) >= REBROADCAST_MIN_AGE_MS && seenMsg.messageData.ttl > 0 &&
+                        memcmp(seenMsg.originalSenderMac, ourMacBytes, 6) != 0) {
+                      messagesToRebroadcast.push_back(seenMsg.messageData);
+                    }
+                  }
+                  portEXIT_CRITICAL(&seenMessagesMutex); // Unlock after preparing list
+                  for (const auto& msg : messagesToRebroadcast) {
+                    Serial.printf("Manually re-broadcasting cached message from Node %s: %s (TTL: %d)\n",
+                                  getMacSuffix(msg.originalSenderMac).c_str(), msg.content, msg.ttl);
+                    sendToAllPeers(msg); // This will decrement TTL before sending
+                    // Update the timestamp in the cache for the re-broadcasted message
+                    // This ensures it stays in the cache for the full DEDUP_CACHE_DURATION_MS from *now*
+                    // and won't be re-broadcast again until it passes REBROADCAST_MIN_AGE_MS again.
+                    addOrUpdateMessageToSeen(msg.messageID, msg.originalSenderMac, msg);
+                    rebroadcastedCount++;
+                  }
+                  webFeedbackMessage = "<p class='feedback' style='color:green;'>Re-broadcasted " + String(rebroadcastedCount) + " messages from cache!</p>";
+                  Serial.printf("Manually re-broadcasted %d messages from cache.\n", rebroadcastedCount);
+                }
               }
+
 
               // --- IMPLEMENT POST/REDIRECT/GET (PRG) PATTERN ---
               // Send a 303 See Other redirect to the same URL.
@@ -784,6 +830,7 @@ void loop() {
             client.println(F("<summary>Send Message</summary>")); // Clickable summary
             client.println(F("<h3>Send a New Message:</h3>")); // Adjusted heading size for form
             client.println(F("<form action=\"/\" method=\"POST\">"));
+            client.println(F("<input type=\"hidden\" name=\"action\" value=\"sendMessage\">")); // Hidden field to identify form
             client.println(F("<label for=\"message_input\">Message:</label>"));
             client.println(F("<input type=\"text\" id=\"message_input\" name=\"message\" placeholder=\"Enter your message here\" required maxlength=\"226\">")); 
             client.println(F("<label for=\"password_input\">Password:</label>")); // Added password label
@@ -797,6 +844,19 @@ void loop() {
             client.println(F("</form>"));
             client.println(F("</details>"));
             // --- End Collapsible Text input form ---
+
+            // --- New: Re-broadcast Cache Button Form ---
+            client.println(F("<details style='margin-top: 15px;'>")); // Add some top margin
+            client.println(F("<summary>Re-broadcast Cache</summary>"));
+            client.println(F("<h3>Force Re-broadcast:</h3>"));
+            client.println(F("<form action=\"/\" method=\"POST\">"));
+            client.println(F("<input type=\"hidden\" name=\"action\" value=\"rebroadcastCache\">")); // Hidden field to identify form
+            client.println(F("<label for=\"rebroadcast_password_input\">Password:</label>")); // Added password label for re-broadcast
+            client.println(F("<input type=\"password\" id=\"rebroadcast_password_input\" name=\"password\" placeholder=\"Enter password\" required>")); // Added password input field
+            client.println(F("<input type=\"submit\" value=\"Re-broadcast Cached Messages\">"));
+            client.println(F("</form>"));
+            client.println(F("</details>"));
+            // --- End Re-broadcast Cache Button Form ---
 
             // --- Recent Senders display, now under the form ---
             client.print(detectedNodesHtmlContent);
@@ -996,7 +1056,8 @@ void displayDeviceInfoMode() {
 
   // Sort by timestamp in descending order (most recent first)
   std::sort(sortedUniqueMacs.begin(), sortedUniqueMacs.end(),
-            [](const std::pair<String, unsigned long>& a, const std::pair<String, unsigned long>& b) {
+            [](const std::pair<String, unsigned long>& a, const \
+            std::pair<String, unsigned long>& b) {
                 return a.second > b.second; // Descending order of timestamp
             });
 
