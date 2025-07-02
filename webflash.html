@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>ESP32 Web Flasher (No CSP, No Drama)</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #222;
+      color: #eee;
+      padding: 30px;
+      text-align: center;
+    }
+    button {
+      font-size: 16px;
+      margin: 10px;
+      padding: 10px 20px;
+    }
+    #log {
+      background: #000;
+      color: #0f0;
+      font-family: monospace;
+      text-align: left;
+      white-space: pre-wrap;
+      border-radius: 5px;
+      border: 1px solid #444;
+      padding: 10px;
+      width: 90%;
+      height: 300px;
+      margin: 20px auto;
+      overflow-y: scroll;
+    }
+  </style>
+</head>
+<body>
+  <h1>ESP32 Web Flasher</h1>
+  <p><strong>Firmware:</strong> <code>firmware.bin</code></p>
+  <button id="connectBtn">🔌 Connect</button>
+  <button id="flashBtn" disabled>⚡ Flash</button>
+  <div id="log">Console output...</div>
+
+  <script type="module">
+    import { flash } from "./bundle.js";
+
+    let port = null;
+    let firmware = null;
+
+    const logArea = document.getElementById("log");
+    const connectBtn = document.getElementById("connectBtn");
+    const flashBtn = document.getElementById("flashBtn");
+
+    const log = (msg) => {
+      const time = new Date().toLocaleTimeString();
+      const line = `[${time}] ${msg}`;
+      logArea.textContent += "\n" + line;
+      logArea.scrollTop = logArea.scrollHeight;
+      console.log(line);
+    };
+
+    // Fetch firmware
+    fetch("firmware.bin")
+      .then(res => {
+        if (!res.ok) throw new Error("Could not load firmware.bin");
+        return res.arrayBuffer();
+      })
+      .then(buf => {
+        firmware = new Uint8Array(buf);
+        log(`✅ firmware.bin loaded (${firmware.length} bytes)`);
+      })
+      .catch(err => log("❌ Firmware error: " + err.message));
+
+    // Connect
+    connectBtn.addEventListener("click", async () => {
+      try {
+        log("🔍 Requesting serial port...");
+        port = await navigator.serial.requestPort();
+        log("✅ Port selected");
+
+        log("🔑 Opening port...");
+        await port.open({ baudRate: 115200 });
+        log("✅ Port opened");
+
+        flashBtn.disabled = false;
+      } catch (e) {
+        log("❌ Connect failed: " + e.message);
+      }
+    });
+
+    // Flash
+    flashBtn.addEventListener("click", async () => {
+      if (!firmware || !port) return log("⚠️ Firmware or port missing");
+
+      try {
+        log("⚡ Flashing firmware...");
+        await flash({
+          port,
+          baudrate: 115200,
+          fileArray: [{ data: firmware, address: 0x1000 }],
+          eraseAll: true,
+          compress: true,
+          log
+        });
+        log("✅ Flash complete!");
+        await port.close();
+        log("🔌 Port closed");
+      } catch (e) {
+        log("❌ Flash error: " + e.message);
+      }
+    });
+  </script>
+</body>
+</html>
