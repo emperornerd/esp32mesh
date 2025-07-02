@@ -61,7 +61,6 @@ unsigned long totalMessagesReceived = 0;
 unsigned long totalUrgentMessages = 0;
 
 unsigned long lastRebroadcast = 0; // Timestamp for last re-broadcast
-unsigned long nextRebroadcastInterval = 0; // Stores the next random re-broadcast interval
 
 int counter = 1; // Still used for the initial auto message
 
@@ -107,14 +106,9 @@ const unsigned long DEDUP_CACHE_DURATION_MS = 600000; // 10 minutes
 // Max number of messages to keep in cache. Prevents memory exhaustion on the ESP32.
 const size_t MAX_CACHE_SIZE = 50; 
 
-// New: Interval for periodic re-broadcasting of old messages from cache
+// New: Fixed interval for periodic re-broadcasting of old messages from cache
 // This is critical for synchronization. Shorter times mean faster catch-up for re-connected nodes.
-// Re-broadcast will be 2 minutes (120s) +/- 30 seconds (30s) = 1.5 minutes to 2.5 minutes
-const unsigned long REBROADCAST_CENTER_MS = 120000; // 2 minutes
-const unsigned long REBROADCAST_RANDOM_RANGE_MS = 30000; // +/- 30 seconds
-// Minimum age before a message is eligible for re-broadcasting.
-// Shorter means messages are re-broadcasted sooner after being seen.
-const unsigned long REBROADCAST_MIN_AGE_MS = 15000; // 15 seconds (Changed from 60000)
+const unsigned long AUTO_REBROADCAST_INTERVAL_MS = 30000; // 30 seconds
 
 // --- FreeRTOS Queue for message processing ---
 QueueHandle_t messageQueue;
@@ -435,10 +429,8 @@ void setup() {
     serialBuffer = serialBuffer.substring(0, 4000); // Truncate from the end
   sendToAllPeers(autoMessage); // Send via ESP-NOW
 
-  // Calculate the first random re-broadcast interval
-  nextRebroadcastInterval = random(REBROADCAST_CENTER_MS - REBROADCAST_RANDOM_RANGE_MS,
-                                   REBROADCAST_CENTER_MS + REBROADCAST_RANDOM_RANGE_MS + 1); // +1 for upper bound inclusivity
-  lastRebroadcast = millis(); // Initialize for the first re-broadcast check
+  // Initialize the lastRebroadcast timestamp for the first check
+  lastRebroadcast = millis();
 }
 
 void loop() {
@@ -475,32 +467,26 @@ void loop() {
   }
 
   // --- Periodic Re-broadcast of Old Messages from Cache ---
-  if (millis() - lastRebroadcast >= nextRebroadcastInterval) {
-    lastRebroadcast = millis();
-    // Calculate the next random interval
-    nextRebroadcastInterval = random(REBROADCAST_CENTER_MS - REBROADCAST_RANDOM_RANGE_MS,
-                                     REBROADCAST_CENTER_MS + REBROADCAST_RANDOM_RANGE_MS + 1); // +1 for upper bound inclusivity
-    Serial.printf("Performing periodic re-broadcast check. Next check in %lu ms.\n", nextRebroadcastInterval);
-    unsigned long currentTime = millis();
+  if (millis() - lastRebroadcast >= AUTO_REBROADCAST_INTERVAL_MS) {
+    lastRebroadcast = millis(); // Reset the timer
+    Serial.printf("Performing periodic re-broadcast of cache. Next check in %lu ms.\n", AUTO_REBROADCAST_INTERVAL_MS);
+    
     portENTER_CRITICAL(&seenMessagesMutex); // Lock while iterating/modifying cache
     std::vector<esp_now_message_t> messagesToRebroadcast;
+    // MODIFIED: Re-broadcast ALL messages in cache that still have TTL
     for (const auto& seenMsg : seenMessages) {
-      // Re-broadcast messages that are old enough, but still have TTL
-      // AND are not from this node (to avoid re-broadcasting our own initial messages too frequently)
-      // Use the globally stored SoftAP MAC for comparison
-      if ((currentTime - seenMsg.timestamp) >= REBROADCAST_MIN_AGE_MS && seenMsg.messageData.ttl > 0 &&
-          memcmp(seenMsg.originalSenderMac, ourMacBytes, 6) != 0) {
+      if (seenMsg.messageData.ttl > 0) {
         messagesToRebroadcast.push_back(seenMsg.messageData);
       }
     }
     portEXIT_CRITICAL(&seenMessagesMutex); // Unlock after preparing list
+
     for (const auto& msg : messagesToRebroadcast) {
       Serial.printf("Re-broadcasting cached message from Node %s: %s (TTL: %d)\n",
                     getMacSuffix(msg.originalSenderMac).c_str(), msg.content, msg.ttl);
       sendToAllPeers(msg); // This will decrement TTL before sending
       // Update the timestamp in the cache for the re-broadcasted message
       // This ensures it stays in the cache for the full DEDUP_CACHE_DURATION_MS from *now*
-      // and won't be re-broadcast again until it passes REBROADCAST_MIN_AGE_MS again.
       addOrUpdateMessageToSeen(msg.messageID, msg.originalSenderMac, msg);
     }
   }
@@ -617,27 +603,22 @@ void loop() {
                   webFeedbackMessage = "<p class='feedback' style='color:red;'>Incorrect password. Re-broadcast failed.</p>";
                   Serial.println("Incorrect password entered for re-broadcast.");
                 } else {
-                  unsigned long currentTime = millis();
                   int rebroadcastedCount = 0;
                   portENTER_CRITICAL(&seenMessagesMutex); // Lock while iterating/modifying cache
                   std::vector<esp_now_message_t> messagesToRebroadcast;
+                  // MODIFIED: Re-broadcast ALL messages in cache that still have TTL
                   for (const auto& seenMsg : seenMessages) {
-                    // Re-broadcast messages that are old enough, but still have TTL
-                    // AND are not from this node (to avoid re-broadcasting our own initial messages too frequently)
-                    // Use the globally stored SoftAP MAC for comparison
-                    if ((currentTime - seenMsg.timestamp) >= REBROADCAST_MIN_AGE_MS && seenMsg.messageData.ttl > 0 &&
-                        memcmp(seenMsg.originalSenderMac, ourMacBytes, 6) != 0) {
+                    if (seenMsg.messageData.ttl > 0) {
                       messagesToRebroadcast.push_back(seenMsg.messageData);
                     }
                   }
                   portEXIT_CRITICAL(&seenMessagesMutex); // Unlock after preparing list
+
                   for (const auto& msg : messagesToRebroadcast) {
                     Serial.printf("Manually re-broadcasting cached message from Node %s: %s (TTL: %d)\n",
                                   getMacSuffix(msg.originalSenderMac).c_str(), msg.content, msg.ttl);
                     sendToAllPeers(msg); // This will decrement TTL before sending
                     // Update the timestamp in the cache for the re-broadcasted message
-                    // This ensures it stays in the cache for the full DEDUP_CACHE_DURATION_MS from *now*
-                    // and won't be re-broadcast again until it passes REBROADCAST_MIN_AGE_MS again.
                     addOrUpdateMessageToSeen(msg.messageID, msg.originalSenderMac, msg);
                     rebroadcastedCount++;
                   }
