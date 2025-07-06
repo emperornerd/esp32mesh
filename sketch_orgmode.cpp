@@ -59,6 +59,12 @@ String webFeedbackMessage = ""; // To send messages back to the web client (e.g.
 bool organizerModeActive = false;   // Is the current session in organizer mode?
 bool publicMessagingEnabled = false; // Is public messaging globally enabled by an organizer?
 
+// --- NEW: Command prefixes for mesh-wide commands ---
+const char* CMD_PREFIX = "CMD::";
+const char* CMD_PUBLIC_ON = "CMD::PUBLIC_ON";
+const char* CMD_PUBLIC_OFF = "CMD::PUBLIC_OFF";
+
+
 // Global counters for statistics
 unsigned long totalMessagesSent = 0;
 unsigned long totalMessagesReceived = 0;
@@ -376,7 +382,7 @@ void setup() {
   esp_now_register_recv_cb(onDataRecv);
 
   esp_now_message_t autoMessage;
-  memset(&autoMessage, 0, sizeof(esp_now_message_t)); 
+  memset(&autoMessage, 0, sizeof(autoMessage)); 
   autoMessage.messageID = esp_random();
   memcpy(autoMessage.originalSenderMac, ourMacBytes, 6);
   autoMessage.ttl = MAX_TTL_HOPS;
@@ -410,6 +416,23 @@ void loop() {
     receivedMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0';
     String incomingContent = String(receivedMessage.content);
     String originalSenderMacSuffix = getMacSuffix(receivedMessage.originalSenderMac);
+
+    // --- NEW: Handle mesh commands ---
+    if (incomingContent.startsWith(CMD_PREFIX)) {
+        if (incomingContent.equals(CMD_PUBLIC_ON)) {
+            if (!publicMessagingEnabled) {
+                publicMessagingEnabled = true;
+                Serial.println("Received command: ENABLE public messaging.");
+                webFeedbackMessage = "<p class='feedback' style='color:blue;'>Public messaging was ENABLED by an organizer.</p>";
+            }
+        } else if (incomingContent.equals(CMD_PUBLIC_OFF)) {
+            if (publicMessagingEnabled) {
+                publicMessagingEnabled = false;
+                Serial.println("Received command: DISABLE public messaging.");
+                webFeedbackMessage = "<p class='feedback' style='color:blue;'>Public messaging was DISABLED by an organizer.</p>";
+            }
+        }
+    }
 
     String formattedIncoming = "Node " + originalSenderMacSuffix + " - " + incomingContent;
     
@@ -527,6 +550,25 @@ void loop() {
                   if (organizerModeActive) {
                       publicMessagingEnabled = !publicMessagingEnabled;
                       webFeedbackMessage = "<p class='feedback' style='color:blue;'>Public messaging has been " + String(publicMessagingEnabled ? "ENABLED" : "DISABLED") + ".</p>";
+
+                      // --- NEW: Broadcast the command to the mesh ---
+                      esp_now_message_t commandMessage;
+                      memset(&commandMessage, 0, sizeof(commandMessage));
+                      commandMessage.messageID = esp_random();
+                      memcpy(commandMessage.originalSenderMac, ourMacBytes, 6);
+                      commandMessage.ttl = MAX_TTL_HOPS;
+                      const char* command = publicMessagingEnabled ? CMD_PUBLIC_ON : CMD_PUBLIC_OFF;
+                      strncpy(commandMessage.content, command, MAX_MESSAGE_CONTENT_LEN);
+                      commandMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0';
+                      
+                      addOrUpdateMessageToSeen(commandMessage.messageID, commandMessage.originalSenderMac, commandMessage);
+                      sendToAllPeers(commandMessage);
+                      totalMessagesSent++;
+                      serialBuffer = String("Node ") + MAC_suffix_str + " - " + command + "\n" + serialBuffer;
+                      if (serialBuffer.length() > 4000) serialBuffer = serialBuffer.substring(0, 4000);
+                      messageProcessed = true; // To trigger display update
+                      // --- END NEW ---
+
                   } else {
                       webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Must be in Organizer Mode.</p>";
                   }
@@ -773,6 +815,9 @@ void loop() {
       displayUrgentOnlyMode(22);
     } else if (currentDisplayMode == MODE_STATS_INFO) {
       displayStatsInfoMode();
+    } else if (currentDisplayMode == MODE_DEVICE_INFO) {
+        // Refresh device info screen if the public state might have changed
+        displayDeviceInfoMode();
     }
   }
 #endif
@@ -827,6 +872,9 @@ void displayDeviceInfoMode() {
   tft.setTextColor(TFT_GREEN);      tft.println("MAC: " + MAC_full_str);
   tft.setTextColor(TFT_GREEN);     tft.println("IP: " + IP.toString());
   tft.setTextColor(TFT_GREEN);      tft.println("Mode: Device Info");
+  
+  // --- REMOVED public messaging status from this screen ---
+
   tft.setTextColor(TFT_WHITE);     tft.println("----------------------");
   tft.println("Nearby Nodes (Last Seen):");
 
@@ -890,5 +938,10 @@ void displayStatsInfoMode() {
   tft.printf("  Total Received: %lu\n", totalMessagesReceived);
   tft.printf("  Urgent Messages: %lu\n", totalUrgentMessages);
   tft.printf("  Cache Size: %u/%u\n", seenMessages.size(), MAX_CACHE_SIZE);
+  
+  // --- MOVED public messaging status to this screen ---
+  tft.println("");
+  tft.println("Mode Status:");
+  tft.printf("  Public Msgs: %s\n", publicMessagingEnabled ? "ENABLED" : "DISABLED");
 }
 #endif
