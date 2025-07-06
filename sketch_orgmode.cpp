@@ -59,6 +59,12 @@ String webFeedbackMessage = ""; // To send messages back to the web client (e.g.
 bool organizerModeActive = false;   // Is the current session in organizer mode?
 bool publicMessagingEnabled = false; // Is public messaging globally enabled by an organizer?
 
+// --- NEW: Brute-force protection globals ---
+int loginAttempts = 0;
+unsigned long lockoutTime = 0;
+const int MAX_LOGIN_ATTEMPTS = 20;
+const unsigned long LOCKOUT_DURATION_MS = 300000; // 5 minutes (5 * 60 * 1000)
+
 // --- NEW: Command prefixes for mesh-wide commands ---
 const char* CMD_PREFIX = "CMD::";
 const char* CMD_PUBLIC_ON = "CMD::PUBLIC_ON";
@@ -536,13 +542,34 @@ void loop() {
               
               // --- NEW: Centralized Action Handling ---
               if (actionParam == "enterOrganizer") {
-                  if (passwordParam == WEB_PASSWORD) {
-                      organizerModeActive = true;
-                      webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer Mode activated.</p>";
+                  // --- NEW: Brute-force protection logic ---
+                  // Check if the lockout is currently active
+                  if (lockoutTime > 0 && millis() < lockoutTime) {
+                      webFeedbackMessage = "<p class='feedback' style='color:red;'>Too many failed attempts. Try again later.</p>";
                   } else {
-                      organizerModeActive = false;
-                      webFeedbackMessage = "<p class='feedback' style='color:red;'>Incorrect password.</p>";
+                      // If lockout time has passed, reset the lockout and the counter
+                      if (lockoutTime > 0 && millis() >= lockoutTime) {
+                          lockoutTime = 0;
+                          loginAttempts = 0;
+                      }
+
+                      if (passwordParam == WEB_PASSWORD) {
+                          organizerModeActive = true;
+                          loginAttempts = 0; // Reset counter on successful login
+                          webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer Mode activated.</p>";
+                      } else {
+                          loginAttempts++;
+                          organizerModeActive = false;
+                          if (loginAttempts >= MAX_LOGIN_ATTEMPTS) {
+                              lockoutTime = millis() + LOCKOUT_DURATION_MS; // Lock for 5 minutes
+                              loginAttempts = 0; // Reset counter for the next lockout cycle
+                              webFeedbackMessage = "<p class='feedback' style='color:red;'>Login locked for 5 minutes due to too many failures.</p>";
+                          } else {
+                              webFeedbackMessage = "<p class='feedback' style='color:red;'>Incorrect password. " + String(MAX_LOGIN_ATTEMPTS - loginAttempts) + " attempts remaining.</p>";
+                          }
+                      }
                   }
+                  // --- END NEW ---
               } else if (actionParam == "exitOrganizer") {
                   organizerModeActive = false;
                   webFeedbackMessage = "<p class='feedback' style='color:blue;'>Exited Organizer Mode.</p>";
