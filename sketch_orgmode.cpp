@@ -55,17 +55,21 @@ String serialBuffer = "";         // Stores messages, most recent on top
 String userMessageBuffer = "";  // To hold the user-entered message from POST
 String webFeedbackMessage = ""; // To send messages back to the web client (e.g., success/error)
 
-// --- NEW: Mode Management Globals ---
-bool organizerModeActive = false;   // Is the current session in organizer mode?
-bool publicMessagingEnabled = false; // Is public messaging globally enabled by an organizer?
+// --- SESSION MANAGEMENT & MODE GLOBALS ---
+// The global organizerModeActive boolean has been REMOVED.
+// It is replaced by a session token system to handle authentication per-client.
+String organizerSessionToken = "";          // Stores the active organizer session token
+unsigned long sessionTokenTimestamp = 0;    // Timestamp of when the token was created/last used
+const unsigned long SESSION_TIMEOUT_MS = 900000; // Session timeout: 15 minutes (15 * 60 * 1000)
+bool publicMessagingEnabled = false;        // Is public messaging globally enabled by an organizer?
 
-// --- NEW: Brute-force protection globals ---
+// --- Brute-force protection globals ---
 int loginAttempts = 0;
 unsigned long lockoutTime = 0;
 const int MAX_LOGIN_ATTEMPTS = 20;
 const unsigned long LOCKOUT_DURATION_MS = 300000; // 5 minutes (5 * 60 * 1000)
 
-// --- NEW: Command prefixes for mesh-wide commands ---
+// --- Command prefixes for mesh-wide commands ---
 const char* CMD_PREFIX = "CMD::";
 const char* CMD_PUBLIC_ON = "CMD::PUBLIC_ON";
 const char* CMD_PUBLIC_OFF = "CMD::PUBLIC_OFF";
@@ -88,42 +92,29 @@ IPAddress netMsk(255, 255, 255, 0);
 DNSServer dnsServer;
 
 // --- Message Structure for ESP-NOW and Deduplication ---
-// This struct will be used to send and receive messages,
-// ensuring each message has a unique ID and original sender MAC.
-// Message content size should be 240 bytes (max 250 bytes - 10 for ID/MAC/TTL).
-// If you change content size, update MAX_MESSAGE_CONTENT_LEN
 #define MAX_MESSAGE_CONTENT_LEN 239 // 250 (max ESP-NOW) - 4 (ID) - 6 (MAC) - 1 (TTL) = 239
-#define MAX_TTL_HOPS 40 // Maximum Time-To-Live (hops) for a message (Increased for larger mesh)
+#define MAX_TTL_HOPS 40 // Maximum Time-To-Live (hops) for a message
 
 typedef struct __attribute__((packed)) {
-  uint32_t messageID;         // Unique ID for the message
-  uint8_t originalSenderMac[6]; // MAC address of the *original* sender
-  uint8_t ttl;                // Time-To-Live (hops remaining)
-  char content[MAX_MESSAGE_CONTENT_LEN]; // Message content
+  uint32_t messageID;
+  uint8_t originalSenderMac[6];
+  uint8_t ttl;
+  char content[MAX_MESSAGE_CONTENT_LEN];
 } esp_now_message_t;
 
 // --- Cache for Deduplication and Re-broadcasting ---
 struct SeenMessage {
   uint32_t messageID;
   uint8_t originalSenderMac[6];
-  unsigned long timestamp; // When this message was last seen/processed
-  esp_now_message_t messageData; // Store the full message for re-broadcasting
+  unsigned long timestamp;
+  esp_now_message_t messageData;
 };
 
-// Global vector for seen messages and mutex for thread-safe access
-// IMPORTANT: Using a mutex for `seenMessages` as it's accessed from ISR context (`onDataRecv`)
-// and the main loop.
 std::vector<SeenMessage> seenMessages;
 portMUX_TYPE seenMessagesMutex = portMUX_INITIALIZER_UNLOCKED;
 
-// Increased cache duration significantly
-// This defines how long a message stays in the cache to prevent duplicates.
 const unsigned long DEDUP_CACHE_DURATION_MS = 600000; // 10 minutes
-// Max number of messages to keep in cache. Prevents memory exhaustion on the ESP32.
-const size_t MAX_CACHE_SIZE = 50; 
-
-// New: Fixed interval for periodic re-broadcasting of old messages from cache
-// This is critical for synchronization. Shorter times mean faster catch-up for re-connected nodes.
+const size_t MAX_CACHE_SIZE = 50;
 const unsigned long AUTO_REBROADCAST_INTERVAL_MS = 30000; // 30 seconds
 
 // --- FreeRTOS Queue for message processing ---
@@ -133,22 +124,22 @@ QueueHandle_t messageQueue;
 // --- Display Mode Definitions ---
 enum DisplayMode {
   MODE_CHAT_LOG,
-  MODE_URGENT_ONLY, // New mode for urgent messages
+  MODE_URGENT_ONLY,
   MODE_DEVICE_INFO,
-  MODE_STATS_INFO // New mode for statistics
+  MODE_STATS_INFO
 };
-DisplayMode currentDisplayMode = MODE_CHAT_LOG; // Start with chat log mode
+DisplayMode currentDisplayMode = MODE_CHAT_LOG;
 
 // --- Touch Debounce for Display Mode Switching ---
 unsigned long lastTouchTime = 0;
-const unsigned long TOUCH_DEBOUNCE_MS = 500; // 500ms debounce
+const unsigned long TOUCH_DEBOUNCE_MS = 500;
 
 // --- FORWARD DECLARATIONS for display functions ---
 #if USE_DISPLAY
 void displayChatLogMode(int numLines);
-void displayUrgentOnlyMode(int numLines); // New forward declaration
+void displayUrgentOnlyMode(int numLines);
 void displayDeviceInfoMode();
-void displayStatsInfoMode(); // New forward declaration
+void displayStatsInfoMode();
 #endif
 // --- END FORWARD DECLARATION ---
 
@@ -162,23 +153,44 @@ String formatMac(const uint8_t *mac) {
 
 // Helper function to get the 4-char suffix from a byte array MAC
 String getMacSuffix(const uint8_t *mac) {
-  char buf[5]; // 4 chars + null terminator
-  snprintf(buf, sizeof(buf), "%02X%02X", mac[4], mac[5]); // Last two bytes (4 hex chars)
+  char buf[5];
+  snprintf(buf, sizeof(buf), "%02X%02X", mac[4], mac[5]);
   return String(buf);
 }
 
-// Corrected: Helper function to format MAC for display as xxxx.xxxx.xxxx.EEFF (last 2 bytes unmasked)
+// Helper function to format MAC for display as xxxx.xxxx.xxxx.EEFF
 String formatMaskedMac(const uint8_t *mac) {
-  char buf[20]; // Sufficient buffer for "xxxx.xxxx.xxxx.EEFF" + null terminator
-  // Mask first three segments, then show the last two bytes (mac[4] and mac[5])
+  char buf[20];
   snprintf(buf, sizeof(buf), "xxxx.xxxx.xxxx.%02X%02X",
            mac[4], mac[5]);
   return String(buf);
 }
 
+// XSS FIX: Helper function to escape HTML special characters.
+String escapeHtml(const String& html) {
+  String escaped = html;
+  escaped.replace("&", "&amp;");
+  escaped.replace("<", "&lt;");
+  escaped.replace(">", "&gt;");
+  escaped.replace("\"", "&quot;");
+  escaped.replace("'", "&#39;");
+  return escaped;
+}
+
+// NEW: Helper function to check if a session token is valid
+bool isOrganizerSessionValid(const String& token) {
+  if (token.length() == 0 || organizerSessionToken.length() == 0) {
+    return false;
+  }
+  if (millis() - sessionTokenTimestamp > SESSION_TIMEOUT_MS) {
+    organizerSessionToken = ""; // Expire the token
+    return false;
+  }
+  return token == organizerSessionToken;
+}
+
 // Function to check if a message is already in the seenMessages cache
 bool isMessageSeen(uint32_t id, const uint8_t* mac) {
-  // Lock the mutex before accessing the shared resource
   portENTER_CRITICAL(&seenMessagesMutex);
   bool found = false;
   for (const auto& msg : seenMessages) {
@@ -187,35 +199,29 @@ bool isMessageSeen(uint32_t id, const uint8_t* mac) {
       break;
     }
   }
-  // Unlock the mutex
   portEXIT_CRITICAL(&seenMessagesMutex);
   return found;
 }
 
 // Function to add or update a message in the seenMessages cache
 void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_message_t& msgData) {
-  // Lock the mutex before accessing the shared resource
   portENTER_CRITICAL(&seenMessagesMutex);
   unsigned long currentTime = millis();
   bool updated = false;
-  // Try to find and update the timestamp if message already exists
   for (auto& msg : seenMessages) {
     if (msg.messageID == id && memcmp(msg.originalSenderMac, mac, 6) == 0) {
-      msg.timestamp = currentTime; // Update timestamp
+      msg.timestamp = currentTime;
       updated = true;
       break;
     }
   }
   if (!updated) {
-    // Remove old entries if not updated
     seenMessages.erase(std::remove_if(seenMessages.begin(), seenMessages.end(),
                                      [currentTime](const SeenMessage& msg) {
                                          return (currentTime - msg.timestamp) > DEDUP_CACHE_DURATION_MS;
                                      }),
                       seenMessages.end());
-    // If cache is full, remove the oldest one before adding new
     if (seenMessages.size() >= MAX_CACHE_SIZE) {
-      // Find the oldest message (smallest timestamp)
       auto oldest = std::min_element(seenMessages.begin(), seenMessages.end(),
                                      [](const SeenMessage& a, const SeenMessage& b) {
                                          return a.timestamp < b.timestamp;
@@ -224,91 +230,63 @@ void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_mes
           seenMessages.erase(oldest);
       }
     }
-    SeenMessage newMessage = {id, {0}, currentTime, msgData}; // Store full message data
+    SeenMessage newMessage = {id, {0}, currentTime, msgData};
     memcpy(newMessage.originalSenderMac, mac, 6);
     seenMessages.push_back(newMessage);
   }
-  // Unlock the mutex
   portEXIT_CRITICAL(&seenMessagesMutex);
 }
 
 // Callback function when ESP-NOW data is received
-// IMPORTANT: Keep this function as lean as possible!
 void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len) {
-  // Basic validation of message length
   if (len != sizeof(esp_now_message_t)) {
-    // Serial.println("Received malformed ESP-NOW message (wrong size)"); // Cannot print from ISR directly
     return;
   }
   esp_now_message_t incomingMessage;
-  // Use memset to clear the structure before copying to avoid junk data,
-  // especially if the received 'len' is smaller than the struct (though we check 'len').
   memset(&incomingMessage, 0, sizeof(esp_now_message_t));
   memcpy(&incomingMessage, data, sizeof(esp_now_message_t));
-
-  // Ensure null-termination of the content, as memcpy doesn't guarantee it if source isn't null-terminated
-  // or if the source is exactly MAX_MESSAGE_CONTENT_LEN long.
   incomingMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0';
 
-  // Check if already seen based on ID and original sender MAC
   if (isMessageSeen(incomingMessage.messageID, incomingMessage.originalSenderMac)) {
-    // If seen, update its timestamp to keep it fresh in cache and prevent its re-broadcast too soon
     addOrUpdateMessageToSeen(incomingMessage.messageID, incomingMessage.originalSenderMac, incomingMessage);
-    return; // Duplicate message, discard from immediate processing.
+    return;
   }
   
-  // Add to seen messages cache immediately (including its data for potential future re-broadcast)
   addOrUpdateMessageToSeen(incomingMessage.messageID, incomingMessage.originalSenderMac, incomingMessage);
 
-  // Increment total messages received
   totalMessagesReceived++;
   if (String(incomingMessage.content).indexOf("Urgent: ") != -1) {
       totalUrgentMessages++;
   }
 
-  // --- TTL Check ---
-  // Only process and potentially re-broadcast if TTL is greater than 0
   if (incomingMessage.ttl == 0) {
-      // Message has reached its hop limit. Do not queue for processing or re-broadcasting.
       return; 
   }
 
-  // If not a duplicate and TTL > 0, push to queue for processing in loop()
-  // Use xQueueSendFromISR for ISR context
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
   if (xQueueSendFromISR(messageQueue, &incomingMessage, &xHigherPriorityTaskWoken) != pdPASS) {
-    // Message dropped due to queue full. Can't print from ISR.
+    // Message dropped
   }
   if (xHigherPriorityTaskWoken == pdTRUE) {
-    portYIELD_FROM_ISR(); // Yield to a higher priority task if one was unblocked
+    portYIELD_FROM_ISR();
   }
 }
 
 // Sends a message to all trusted ESP-NOW peers
-void sendToAllPeers(esp_now_message_t message) { // Pass by value so we can decrement TTL locally
-  // Use the globally stored SoftAP MAC address for comparison
+void sendToAllPeers(esp_now_message_t message) {
   uint8_t currentMacBytes[6];
   memcpy(currentMacBytes, ourMacBytes, 6);
 
-  // --- Decrement TTL before sending ---
-  // This is crucial for re-broadcasted messages.
   if (message.ttl > 0) { 
       message.ttl--; 
   } else {
-      // This should ideally not happen if TTL check is done before calling sendToAllPeers
-      // but as a safeguard, if TTL is already 0, don't send.
       Serial.println("Attempted to re-broadcast message with TTL 0. Skipping.");
       return;
   }
 
   for (int i = 0; i < numTrusted; i++) {
-    // Prevent sending back to the original sender to avoid loops in the mesh.
-    // Also, don't send to ourselves if we are the original sender (to avoid sending it back to us,
-    // although our local addMessageToSeen already handles our own messages as "seen").
     if (memcmp(trustedMACs[i], message.originalSenderMac, 6) != 0 && memcmp(trustedMACs[i], currentMacBytes, 6) != 0) {
-      esp_err_t result = esp_now_send(trustedMACs[i], (uint8_t*)&message, sizeof(esp_now_message_t));
-      if (result != ESP_OK)
-        Serial.printf("Send to %s failed (err %d)\n", formatMac(trustedMACs[i]).c_str(), result);
+      esp_now_send(trustedMACs[i], (uint8_t*)&message, sizeof(esp_now_message_t));
     }
   }
 }
@@ -317,14 +295,12 @@ void setup() {
   Serial.begin(115200);
   randomSeed(analogRead(0)); 
 
-  // Initialize new mode variables
-  organizerModeActive = false;
   publicMessagingEnabled = false;
 
   messageQueue = xQueueCreate(QUEUE_SIZE, sizeof(esp_now_message_t));
   if (messageQueue == NULL) {
     Serial.println("Failed to create message queue!");
-    while(true) { delay(100); } // Halt if queue creation fails
+    while(true) { delay(100); }
   }
 
   WiFi.mode(WIFI_AP_STA);
@@ -378,11 +354,7 @@ void setup() {
     memcpy(peer.peer_addr, trustedMACs[i], 6);
     peer.channel = WIFI_CHANNEL;
     peer.encrypt = false;
-    esp_err_t result = esp_now_add_peer(&peer);
-    if (result == ESP_OK)
-      Serial.println("Peer added: " + formatMac(trustedMACs[i]));
-    else
-      Serial.printf("Failed to add peer %s (err %d)\n", formatMac(trustedMACs[i]).c_str(), result);
+    esp_now_add_peer(&peer);
   }
 
   esp_now_register_recv_cb(onDataRecv);
@@ -423,7 +395,6 @@ void loop() {
     String incomingContent = String(receivedMessage.content);
     String originalSenderMacSuffix = getMacSuffix(receivedMessage.originalSenderMac);
 
-    // --- NEW: Handle mesh commands ---
     if (incomingContent.startsWith(CMD_PREFIX)) {
         if (incomingContent.equals(CMD_PUBLIC_ON)) {
             if (!publicMessagingEnabled) {
@@ -457,8 +428,6 @@ void loop() {
 
   if (millis() - lastRebroadcast >= AUTO_REBROADCAST_INTERVAL_MS) {
     lastRebroadcast = millis();
-    Serial.printf("Performing periodic re-broadcast of cache. Next check in %lu ms.\n", AUTO_REBROADCAST_INTERVAL_MS);
-    
     portENTER_CRITICAL(&seenMessagesMutex);
     std::vector<esp_now_message_t> messagesToRebroadcast;
     for (const auto& seenMsg : seenMessages) {
@@ -469,8 +438,6 @@ void loop() {
     portEXIT_CRITICAL(&seenMessagesMutex);
 
     for (const auto& msg : messagesToRebroadcast) {
-      Serial.printf("Re-broadcasting cached message from Node %s: %s (TTL: %d)\n",
-                    getMacSuffix(msg.originalSenderMac).c_str(), msg.content, msg.ttl);
       sendToAllPeers(msg);
       addOrUpdateMessageToSeen(msg.messageID, msg.originalSenderMac, msg);
     }
@@ -491,22 +458,43 @@ void loop() {
         char c = client.read();
         if (c == '\n') {
           if (currentLine.length() == 0) {
-            if (!isPost && requestedPath != "/" && requestedPath.indexOf("?show_public") == -1) {
-                Serial.println("Intercepted non-root GET request for: " + requestedPath + ". Redirecting to captive portal.");
-                client.println(F("HTTP/1.1 302 Found"));
-                client.println(F("Location: http://192.168.4.1/"));
-                client.println(F("Connection: close"));
-                client.println();
-                client.stop();
-                return;
+            String sessionTokenParam = ""; // Will hold token from either GET or POST
+            bool isOrganizerRequest = false; // Is this request authenticated as an organizer?
+
+            // First, determine if it's a GET or POST and extract the session token
+            if (isPost) {
+                for (int i = 0; i < contentLength && client.available(); i++) {
+                    postBody += (char)client.read();
+                }
+                Serial.println("Received POST Body: " + postBody);
+
+                int tokenStart = postBody.indexOf("session_token=");
+                if (tokenStart != -1) {
+                    int tokenEnd = postBody.indexOf('&', tokenStart);
+                    if (tokenEnd == -1) tokenEnd = postBody.length();
+                    sessionTokenParam = postBody.substring(tokenStart + 14, tokenEnd);
+                }
+            } else { // It's a GET request
+                int tokenStart = requestedPath.indexOf("session_token=");
+                if (tokenStart != -1) {
+                    sessionTokenParam = requestedPath.substring(tokenStart + 14);
+                }
+                // Handle captive portal redirect for non-root GETs
+                if (requestedPath != "/" && requestedPath.indexOf("?show_public") == -1 && tokenStart == -1) {
+                    Serial.println("Intercepted non-root GET request for: " + requestedPath + ". Redirecting to captive portal.");
+                    client.println(F("HTTP/1.1 302 Found"));
+                    client.println(F("Location: http://192.168.4.1/"));
+                    client.println(F("Connection: close"));
+                    client.println();
+                    client.stop();
+                    return;
+                }
             }
 
+            // Now, validate the session token
+            isOrganizerRequest = isOrganizerSessionValid(sessionTokenParam);
+
             if (isPost) {
-              for (int i = 0; i < contentLength && client.available(); i++) {
-                postBody += (char)client.read();
-              }
-              Serial.println("Received POST Body: " + postBody);
-              
               String messageParam = "", passwordParam = "", urgentParam = "", actionParam = "";
               int messageStart = postBody.indexOf("message=");
               if (messageStart != -1) {
@@ -540,45 +528,46 @@ void loop() {
                 }
               }
               
-              // --- NEW: Centralized Action Handling ---
               if (actionParam == "enterOrganizer") {
-                  // --- NEW: Brute-force protection logic ---
-                  // Check if the lockout is currently active
                   if (lockoutTime > 0 && millis() < lockoutTime) {
                       webFeedbackMessage = "<p class='feedback' style='color:red;'>Too many failed attempts. Try again later.</p>";
                   } else {
-                      // If lockout time has passed, reset the lockout and the counter
                       if (lockoutTime > 0 && millis() >= lockoutTime) {
                           lockoutTime = 0;
                           loginAttempts = 0;
                       }
-
                       if (passwordParam == WEB_PASSWORD) {
-                          organizerModeActive = true;
-                          loginAttempts = 0; // Reset counter on successful login
+                          loginAttempts = 0;
+                          organizerSessionToken = String(esp_random()) + String(esp_random());
+                          sessionTokenTimestamp = millis();
                           webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer Mode activated.</p>";
+                          client.println(F("HTTP/1.1 303 See Other"));
+                          client.println("Location: /?session_token=" + organizerSessionToken);
+                          client.println(F("Connection: close"));
+                          client.println();
+                          client.stop();
+                          return;
                       } else {
                           loginAttempts++;
-                          organizerModeActive = false;
                           if (loginAttempts >= MAX_LOGIN_ATTEMPTS) {
-                              lockoutTime = millis() + LOCKOUT_DURATION_MS; // Lock for 5 minutes
-                              loginAttempts = 0; // Reset counter for the next lockout cycle
+                              lockoutTime = millis() + LOCKOUT_DURATION_MS;
+                              loginAttempts = 0;
                               webFeedbackMessage = "<p class='feedback' style='color:red;'>Login locked for 5 minutes due to too many failures.</p>";
                           } else {
                               webFeedbackMessage = "<p class='feedback' style='color:red;'>Incorrect password. " + String(MAX_LOGIN_ATTEMPTS - loginAttempts) + " attempts remaining.</p>";
                           }
                       }
                   }
-                  // --- END NEW ---
               } else if (actionParam == "exitOrganizer") {
-                  organizerModeActive = false;
+                  if (isOrganizerRequest) {
+                      organizerSessionToken = ""; // Invalidate the token
+                  }
                   webFeedbackMessage = "<p class='feedback' style='color:blue;'>Exited Organizer Mode.</p>";
               } else if (actionParam == "togglePublic") {
-                  if (organizerModeActive) {
+                  if (isOrganizerRequest) {
+                      sessionTokenTimestamp = millis(); // Refresh session
                       publicMessagingEnabled = !publicMessagingEnabled;
                       webFeedbackMessage = "<p class='feedback' style='color:blue;'>Public messaging has been " + String(publicMessagingEnabled ? "ENABLED" : "DISABLED") + ".</p>";
-
-                      // --- NEW: Broadcast the command to the mesh ---
                       esp_now_message_t commandMessage;
                       memset(&commandMessage, 0, sizeof(commandMessage));
                       commandMessage.messageID = esp_random();
@@ -587,30 +576,30 @@ void loop() {
                       const char* command = publicMessagingEnabled ? CMD_PUBLIC_ON : CMD_PUBLIC_OFF;
                       strncpy(commandMessage.content, command, MAX_MESSAGE_CONTENT_LEN);
                       commandMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0';
-                      
                       addOrUpdateMessageToSeen(commandMessage.messageID, commandMessage.originalSenderMac, commandMessage);
                       sendToAllPeers(commandMessage);
                       totalMessagesSent++;
                       serialBuffer = String("Node ") + MAC_suffix_str + " - " + command + "\n" + serialBuffer;
                       if (serialBuffer.length() > 4000) serialBuffer = serialBuffer.substring(0, 4000);
-                      messageProcessed = true; // To trigger display update
-                      // --- END NEW ---
-
+                      messageProcessed = true;
                   } else {
-                      webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Must be in Organizer Mode.</p>";
+                      webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Invalid or expired session.</p>";
                   }
-              } else if (actionParam == "sendMessage") { // Organizer Send
-                  if (!organizerModeActive) {
-                      webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Not in Organizer Mode.</p>";
-                  } else if (decodedMessage.length() == 0) {
-                      webFeedbackMessage = "<p class='feedback' style='color:orange;'>Please enter a message.</p>";
-                  } else {
-                      if (urgentParam == "on") { decodedMessage = "Urgent: " + decodedMessage; }
-                      if (decodedMessage.length() >= MAX_MESSAGE_CONTENT_LEN) {
-                          decodedMessage = decodedMessage.substring(0, MAX_MESSAGE_CONTENT_LEN - 1);
+              } else if (actionParam == "sendMessage") {
+                  if (isOrganizerRequest) {
+                      sessionTokenTimestamp = millis(); // Refresh session
+                      if (decodedMessage.length() == 0) {
+                          webFeedbackMessage = "<p class='feedback' style='color:orange;'>Please enter a message.</p>";
+                      } else {
+                          if (urgentParam == "on") { decodedMessage = "Urgent: " + decodedMessage; }
+                          if (decodedMessage.length() >= MAX_MESSAGE_CONTENT_LEN) {
+                              decodedMessage = decodedMessage.substring(0, MAX_MESSAGE_CONTENT_LEN - 1);
+                          }
+                          userMessageBuffer = decodedMessage;
+                          webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer message queued!</p>";
                       }
-                      userMessageBuffer = decodedMessage;
-                      webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer message queued!</p>";
+                  } else {
+                      webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Invalid or expired session.</p>";
                   }
               } else if (actionParam == "sendPublicMessage") {
                   if (!publicMessagingEnabled) {
@@ -626,9 +615,8 @@ void loop() {
                       webFeedbackMessage = "<p class='feedback' style='color:green;'>Public message queued!</p>";
                   }
               } else if (actionParam == "rebroadcastCache") {
-                  if (!organizerModeActive) {
-                      webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Not in Organizer Mode.</p>";
-                  } else {
+                  if (isOrganizerRequest) {
+                      sessionTokenTimestamp = millis(); // Refresh session
                       int rebroadcastedCount = 0;
                       portENTER_CRITICAL(&seenMessagesMutex);
                       std::vector<esp_now_message_t> toRebroadcast;
@@ -640,17 +628,24 @@ void loop() {
                           rebroadcastedCount++;
                       }
                       webFeedbackMessage = "<p class='feedback' style='color:green;'>Re-broadcasted " + String(rebroadcastedCount) + " messages!</p>";
+                  } else {
+                      webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Invalid or expired session.</p>";
                   }
               }
 
               client.println(F("HTTP/1.1 303 See Other"));
-              client.println(F("Location: /"));
+              String redirectUrl = "/";
+              if (isOrganizerRequest) {
+                  redirectUrl += "?session_token=" + sessionTokenParam;
+              }
+              client.println("Location: " + redirectUrl);
               client.println(F("Connection: close"));
               client.println();
               client.stop();
               return;
             }
 
+            // --- HTML Page Rendering ---
             std::map<String, unsigned long> uniqueRecentMacsMap; 
             portENTER_CRITICAL(&seenMessagesMutex);
             for (const auto& seenMsg : seenMessages) {
@@ -717,7 +712,9 @@ void loop() {
                 if(lineEnd == -1) lineEnd = tempBuffer.length();
                 String line = tempBuffer.substring(lineStart, lineEnd);
                 if(line.indexOf("- Public: ") != -1 && !showPublicView) { /* skip */ }
-                else { displayedBuffer += line + "\n"; }
+                else { 
+                    displayedBuffer += escapeHtml(line) + "\n"; 
+                }
                 lineStart = lineEnd + 1;
             }
             client.println(F("<h2>Serial Data Log:</h2><pre>"));
@@ -725,26 +722,35 @@ void loop() {
             client.println(F("</pre>"));
 
             client.println(F("<div style='text-align:center; margin: 15px;'>"));
-            if(showPublicView) client.println(F("<a href='/' class='button-link secondary'>Hide Public Messages</a>"));
-            else client.println(F("<a href='/?show_public=true' class='button-link'>Show Public Messages</a>"));
-            client.println(F("</div>"));
+            String publicLink = showPublicView ? "/" : "/?show_public=true";
+            if (isOrganizerRequest) { publicLink += (showPublicView ? "?" : "&") + String("session_token=") + sessionTokenParam; }
+            client.print("<a href='" + publicLink + "' class='button-link" + (showPublicView ? " secondary" : "") + "'>");
+            client.print(showPublicView ? "Hide Public Messages" : "Show Public Messages");
+            client.println("</a></div>");
 
-            if(organizerModeActive) {
+            if(isOrganizerRequest) {
                 client.println(F("<details open><summary>Organizer Controls</summary>"));
                 client.println(F("<div class='form-container' style='box-shadow:none;border:none;padding-top:5px;'>"));
                 client.println(F("<h3>Send Organizer Message:</h3><form action='/' method='POST'><input type='hidden' name='action' value='sendMessage'>"));
+                client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
                 client.println(F("<label for='msg_input'>Message:</label><input type='text' id='msg_input' name='message' required maxlength='226'>"));
                 client.println(F("<div style='display:flex;align-items:center;justify-content:center;width:80%;margin-bottom:10px;'><input type='checkbox' id='urgent_input' name='urgent' value='on' style='margin-right:8px;'><label for='urgent_input' style='margin-bottom:0;'>Urgent</label></div>"));
                 client.println(F("<input type='submit' value='Send Message'></form></div>"));
                 
                 client.println(F("<div class='form-container' style='box-shadow:none;border:none;padding-top:5px;margin-top:5px;'><h3>Admin Actions</h3>"));
                 client.println(F("<form action='/' method='POST' style='flex-direction:row;justify-content:center;gap:10px;'>"));
-                client.println(F("<input type='hidden' name='action' value='rebroadcastCache'><input type='submit' value='Re-broadcast Cache'></form>"));
+                client.println(F("<input type='hidden' name='action' value='rebroadcastCache'>"));
+                client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
+                client.println(F("<input type='submit' value='Re-broadcast Cache'></form>"));
                 client.println(F("<form action='/' method='POST' style='flex-direction:row;justify-content:center;gap:10px;margin-top:10px;'>"));
-                client.println(F("<input type='hidden' name='action' value='togglePublic'><input type='submit' value='"));
+                client.println(F("<input type='hidden' name='action' value='togglePublic'>"));
+                client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
+                client.print(F("<input type='submit' value='"));
                 client.print(publicMessagingEnabled ? "Disable Public Msgs" : "Enable Public Msgs");
                 client.println(F("'></form>"));
-                client.println(F("<form action='/' method='POST' style='margin-top:10px;'><input type='hidden' name='action' value='exitOrganizer'><input type='submit' value='Exit Organizer Mode' class='button-link secondary' style='background-color:#dc3545;'></form>"));
+                client.println(F("<form action='/' method='POST' style='margin-top:10px;'><input type='hidden' name='action' value='exitOrganizer'>"));
+                client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
+                client.println(F("<input type='submit' value='Exit Organizer Mode' class='button-link secondary' style='background-color:#dc3545;'></form>"));
                 client.println(F("</div></details>"));
             } else {
                 client.println(F("<details><summary>Enter Organizer Mode</summary><div class='form-container' style='box-shadow:none;border:none;padding-top:5px;'>"));
@@ -775,6 +781,12 @@ void loop() {
             }
             if (currentLine.startsWith("Content-Length: ")) {
               contentLength = currentLine.substring(16).toInt();
+              // DOS FIX: Limit content length to a reasonable size to prevent memory exhaustion
+              if (contentLength > 2048) {
+                  Serial.printf("Error: Excessive Content-Length (%d). Closing connection to prevent DoS.\n", contentLength);
+                  client.stop();
+                  return; // Abort processing this client
+              }
             }
             currentLine = "";
           }
@@ -788,7 +800,7 @@ void loop() {
 
   if (userMessageBuffer.length() > 0) {
     esp_now_message_t userEspNowMessage;
-    memset(&userEspNowMessage, 0, sizeof(esp_now_message_t)); 
+    memset(&userEspNowMessage, 0, sizeof(userEspNowMessage)); 
     userEspNowMessage.messageID = esp_random();
     memcpy(userEspNowMessage.originalSenderMac, ourMacBytes, 6);
     userEspNowMessage.ttl = MAX_TTL_HOPS;
@@ -843,7 +855,6 @@ void loop() {
     } else if (currentDisplayMode == MODE_STATS_INFO) {
       displayStatsInfoMode();
     } else if (currentDisplayMode == MODE_DEVICE_INFO) {
-        // Refresh device info screen if the public state might have changed
         displayDeviceInfoMode();
     }
   }
@@ -900,8 +911,6 @@ void displayDeviceInfoMode() {
   tft.setTextColor(TFT_GREEN);     tft.println("IP: " + IP.toString());
   tft.setTextColor(TFT_GREEN);      tft.println("Mode: Device Info");
   
-  // --- REMOVED public messaging status from this screen ---
-
   tft.setTextColor(TFT_WHITE);     tft.println("----------------------");
   tft.println("Nearby Nodes (Last Seen):");
 
@@ -966,7 +975,6 @@ void displayStatsInfoMode() {
   tft.printf("  Urgent Messages: %lu\n", totalUrgentMessages);
   tft.printf("  Cache Size: %u/%u\n", seenMessages.size(), MAX_CACHE_SIZE);
   
-  // --- MOVED public messaging status to this screen ---
   tft.println("");
   tft.println("Mode Status:");
   tft.printf("  Public Msgs: %s\n", publicMessagingEnabled ? "ENABLED" : "DISABLED");
