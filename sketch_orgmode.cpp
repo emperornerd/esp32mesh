@@ -18,28 +18,18 @@ TFT_eSPI tft = TFT_eSPI();
 bool displayActive = false;
 
 // Define the T_IRQ pin explicitly here for direct digitalRead debugging
-// IMPORTANT: This should match your User_Setup.h for your specific board (e.g., ESP32-CYD)
-// Common T_IRQ for CYD: GPIO36 or GPIO39. Please verify your board's pinout.
 #define TFT_TOUCH_IRQ_PIN 36 // Example: Change to 39 if your board uses GPIO39 for T_IRQ
 #endif
 
-// Hard-coded password for web input
 const char* WEB_PASSWORD = "password"; // The password for accessing the message input
 
-// Trusted MACs are now used for both receive and send authorization
-// For simplicity, we are assuming all ESP32s in your network will be peers.
-// Replace these with the actual MAC addresses of all your ESP32 nodes.
-// Example: {0x14, 0x33, 0x5C, 0x06, 0x3A, 0x99} for 14:33:5C:06:3A:99
 const uint8_t trustedMACs[][6] = {
   {0x08, 0xA6, 0xF7, 0x47, 0xFA, 0xAD},    // MAC of node A (example, keep if correct for your setup)
   {0x14, 0x33, 0x5C, 0x6D, 0x74, 0x05},    // MAC of node B
   {0x14, 0x33, 0x5C, 0x6C, 0x3A, 0x99}     // MAC of node C
-  // Add all other ESP32 MAC addresses here, ensuring they are exact!
 };
 const int numTrusted = sizeof(trustedMACs) / sizeof(trustedMACs[0]);
 
-// Define a consistent channel for both SoftAP and ESP-NOW
-// Channel 1 is a common default and good starting point.
 const int WIFI_CHANNEL = 1;
 
 WiFiServer server(80);
@@ -47,35 +37,26 @@ IPAddress IP; // This will store the actual IP of the SoftAP (192.168.4.1)
 String MAC_full_str; // Full MAC address of this ESP32 (e.g., "AA:BB:CC:DD:EE:FF")
 String MAC_suffix_str; // Last 4 chars of our MAC (e.g., "EEFF")
 String ssid; // Our unique SSID
-
-// Global variable to store our own MAC address in byte array format for consistency
 uint8_t ourMacBytes[6];
 
 String serialBuffer = "";         // Stores messages, most recent on top
 String userMessageBuffer = "";  // To hold the user-entered message from POST
 String webFeedbackMessage = ""; // To send messages back to the web client (e.g., success/error)
 
-// --- SESSION MANAGEMENT & MODE GLOBALS ---
-// The global organizerModeActive boolean has been REMOVED.
-// It is replaced by a session token system to handle authentication per-client.
 String organizerSessionToken = "";          // Stores the active organizer session token
 unsigned long sessionTokenTimestamp = 0;    // Timestamp of when the token was created/last used
-const unsigned long SESSION_TIMEOUT_MS = 900000; // Session timeout: 15 minutes (15 * 60 * 1000)
-bool publicMessagingEnabled = false;        // Is public messaging globally enabled by an organizer?
+const unsigned long SESSION_TIMEOUT_MS = 900000; // Session timeout: 15 minutes
+bool publicMessagingEnabled = false;
 
-// --- Brute-force protection globals ---
 int loginAttempts = 0;
 unsigned long lockoutTime = 0;
 const int MAX_LOGIN_ATTEMPTS = 20;
-const unsigned long LOCKOUT_DURATION_MS = 300000; // 5 minutes (5 * 60 * 1000)
+const unsigned long LOCKOUT_DURATION_MS = 300000; // 5 minutes
 
-// --- Command prefixes for mesh-wide commands ---
 const char* CMD_PREFIX = "CMD::";
 const char* CMD_PUBLIC_ON = "CMD::PUBLIC_ON";
 const char* CMD_PUBLIC_OFF = "CMD::PUBLIC_OFF";
 
-
-// Global counters for statistics
 unsigned long totalMessagesSent = 0;
 unsigned long totalMessagesReceived = 0;
 unsigned long totalUrgentMessages = 0;
@@ -84,14 +65,11 @@ unsigned long lastRebroadcast = 0; // Timestamp for last re-broadcast
 
 int counter = 1; // Still used for the initial auto message
 
-// REQUIRED: Define the static IP address for the SoftAP and DNS server
 IPAddress apIP(192, 168, 4, 1);
 IPAddress netMsk(255, 255, 255, 0);
 
-// REQUIRED: DNS server object
 DNSServer dnsServer;
 
-// --- Message Structure for ESP-NOW and Deduplication ---
 #define MAX_MESSAGE_CONTENT_LEN 239 // 250 (max ESP-NOW) - 4 (ID) - 6 (MAC) - 1 (TTL) = 239
 #define MAX_TTL_HOPS 40 // Maximum Time-To-Live (hops) for a message
 
@@ -102,7 +80,6 @@ typedef struct __attribute__((packed)) {
   char content[MAX_MESSAGE_CONTENT_LEN];
 } esp_now_message_t;
 
-// --- Cache for Deduplication and Re-broadcasting ---
 struct SeenMessage {
   uint32_t messageID;
   uint8_t originalSenderMac[6];
@@ -117,11 +94,9 @@ const unsigned long DEDUP_CACHE_DURATION_MS = 600000; // 10 minutes
 const size_t MAX_CACHE_SIZE = 50;
 const unsigned long AUTO_REBROADCAST_INTERVAL_MS = 30000; // 30 seconds
 
-// --- FreeRTOS Queue for message processing ---
 QueueHandle_t messageQueue;
-#define QUEUE_SIZE 10 // Max messages to queue
+#define QUEUE_SIZE 10
 
-// --- Display Mode Definitions ---
 enum DisplayMode {
   MODE_CHAT_LOG,
   MODE_URGENT_ONLY,
@@ -130,20 +105,16 @@ enum DisplayMode {
 };
 DisplayMode currentDisplayMode = MODE_CHAT_LOG;
 
-// --- Touch Debounce for Display Mode Switching ---
 unsigned long lastTouchTime = 0;
 const unsigned long TOUCH_DEBOUNCE_MS = 500;
 
-// --- FORWARD DECLARATIONS for display functions ---
 #if USE_DISPLAY
 void displayChatLogMode(int numLines);
 void displayUrgentOnlyMode(int numLines);
 void displayDeviceInfoMode();
 void displayStatsInfoMode();
 #endif
-// --- END FORWARD DECLARATION ---
 
-// Helper function to format a byte array MAC address into a String (full MAC)
 String formatMac(const uint8_t *mac) {
   char buf[18];
   snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -151,14 +122,12 @@ String formatMac(const uint8_t *mac) {
   return String(buf);
 }
 
-// Helper function to get the 4-char suffix from a byte array MAC
 String getMacSuffix(const uint8_t *mac) {
   char buf[5];
   snprintf(buf, sizeof(buf), "%02X%02X", mac[4], mac[5]);
   return String(buf);
 }
 
-// Helper function to format MAC for display as xxxx.xxxx.xxxx.EEFF
 String formatMaskedMac(const uint8_t *mac) {
   char buf[20];
   snprintf(buf, sizeof(buf), "xxxx.xxxx.xxxx.%02X%02X",
@@ -166,7 +135,6 @@ String formatMaskedMac(const uint8_t *mac) {
   return String(buf);
 }
 
-// XSS FIX: Helper function to escape HTML special characters.
 String escapeHtml(const String& html) {
   String escaped = html;
   escaped.replace("&", "&amp;");
@@ -177,19 +145,17 @@ String escapeHtml(const String& html) {
   return escaped;
 }
 
-// NEW: Helper function to check if a session token is valid
 bool isOrganizerSessionValid(const String& token) {
   if (token.length() == 0 || organizerSessionToken.length() == 0) {
     return false;
   }
   if (millis() - sessionTokenTimestamp > SESSION_TIMEOUT_MS) {
-    organizerSessionToken = ""; // Expire the token
+    organizerSessionToken = "";
     return false;
   }
   return token == organizerSessionToken;
 }
 
-// Function to check if a message is already in the seenMessages cache
 bool isMessageSeen(uint32_t id, const uint8_t* mac) {
   portENTER_CRITICAL(&seenMessagesMutex);
   bool found = false;
@@ -203,7 +169,6 @@ bool isMessageSeen(uint32_t id, const uint8_t* mac) {
   return found;
 }
 
-// Function to add or update a message in the seenMessages cache
 void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_message_t& msgData) {
   portENTER_CRITICAL(&seenMessagesMutex);
   unsigned long currentTime = millis();
@@ -237,7 +202,6 @@ void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_mes
   portEXIT_CRITICAL(&seenMessagesMutex);
 }
 
-// Callback function when ESP-NOW data is received
 void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len) {
   if (len != sizeof(esp_now_message_t)) {
     return;
@@ -272,7 +236,6 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
   }
 }
 
-// Sends a message to all trusted ESP-NOW peers
 void sendToAllPeers(esp_now_message_t message) {
   uint8_t currentMacBytes[6];
   memcpy(currentMacBytes, ourMacBytes, 6);
@@ -458,10 +421,10 @@ void loop() {
         char c = client.read();
         if (c == '\n') {
           if (currentLine.length() == 0) {
-            String sessionTokenParam = ""; // Will hold token from either GET or POST
-            bool isOrganizerRequest = false; // Is this request authenticated as an organizer?
+            String sessionTokenParam = "";
+            bool isOrganizerRequest = false;
 
-            // First, determine if it's a GET or POST and extract the session token
+            // --- GET/POST and request path parsing ---
             if (isPost) {
                 for (int i = 0; i < contentLength && client.available(); i++) {
                     postBody += (char)client.read();
@@ -479,6 +442,56 @@ void loop() {
                 if (tokenStart != -1) {
                     sessionTokenParam = requestedPath.substring(tokenStart + 14);
                 }
+                // --- CAPTIVE PORTAL REDIRECT PATCH ---
+                // --- BEGIN: Connectivity Check Response Patch ---
+                if (!isPost) {
+                  bool isConnectivityCheck = false;
+                  String lowerPath = requestedPath;
+                  lowerPath.toLowerCase();
+                  if (
+                      lowerPath == "/generate_204" ||
+                      lowerPath == "/hotspot-detect.html" ||
+                      lowerPath == "/ncsi.txt" ||
+                      lowerPath == "/connecttest.txt" ||
+                      lowerPath == "/captive-portal" ||
+                      lowerPath == "/success.txt" ||
+                      lowerPath == "/library/test/success.html" ||
+                      lowerPath.startsWith("/redirect") ||
+                      lowerPath.indexOf("connectivitycheck.gstatic.com") != -1 ||
+                      lowerPath.indexOf("msftconnecttest.com") != -1 ||
+                      lowerPath.indexOf("apple.com") != -1 ||
+                      lowerPath.indexOf("hotspot-detect.html") != -1
+                     ) {
+                    isConnectivityCheck = true;
+                  }
+
+                  if (isConnectivityCheck) {
+                    if (lowerPath == "/generate_204") {
+                      client.println(F("HTTP/1.1 204 No Content"));
+                      client.println(F("Connection: close"));
+                      client.println();
+                      client.stop();
+                      return;
+                    } else if (lowerPath == "/hotspot-detect.html" || lowerPath == "/ncsi.txt" || lowerPath == "/connecttest.txt" || lowerPath == "/success.txt") {
+                      client.println(F("HTTP/1.1 200 OK"));
+                      client.println(F("Content-Type: text/plain"));
+                      client.println(F("Connection: close"));
+                      client.println();
+                      client.println("Success");
+                      client.stop();
+                      return;
+                    } else {
+                      client.println(F("HTTP/1.1 200 OK"));
+                      client.println(F("Content-Type: text/html"));
+                      client.println(F("Connection: close"));
+                      client.println();
+                      client.println(F("<html><head><title>Success</title></head><body>Success</body></html>"));
+                      client.stop();
+                      return;
+                    }
+                  }
+                }
+                // --- END: Connectivity Check Response Patch ---
                 // Handle captive portal redirect for non-root GETs
                 if (requestedPath != "/" && requestedPath.indexOf("?show_public") == -1 && tokenStart == -1) {
                     Serial.println("Intercepted non-root GET request for: " + requestedPath + ". Redirecting to captive portal.");
@@ -491,7 +504,6 @@ void loop() {
                 }
             }
 
-            // Now, validate the session token
             isOrganizerRequest = isOrganizerSessionValid(sessionTokenParam);
 
             if (isPost) {
@@ -560,12 +572,12 @@ void loop() {
                   }
               } else if (actionParam == "exitOrganizer") {
                   if (isOrganizerRequest) {
-                      organizerSessionToken = ""; // Invalidate the token
+                      organizerSessionToken = "";
                   }
                   webFeedbackMessage = "<p class='feedback' style='color:blue;'>Exited Organizer Mode.</p>";
               } else if (actionParam == "togglePublic") {
                   if (isOrganizerRequest) {
-                      sessionTokenTimestamp = millis(); // Refresh session
+                      sessionTokenTimestamp = millis();
                       publicMessagingEnabled = !publicMessagingEnabled;
                       webFeedbackMessage = "<p class='feedback' style='color:blue;'>Public messaging has been " + String(publicMessagingEnabled ? "ENABLED" : "DISABLED") + ".</p>";
                       esp_now_message_t commandMessage;
@@ -587,7 +599,7 @@ void loop() {
                   }
               } else if (actionParam == "sendMessage") {
                   if (isOrganizerRequest) {
-                      sessionTokenTimestamp = millis(); // Refresh session
+                      sessionTokenTimestamp = millis();
                       if (decodedMessage.length() == 0) {
                           webFeedbackMessage = "<p class='feedback' style='color:orange;'>Please enter a message.</p>";
                       } else {
@@ -616,7 +628,7 @@ void loop() {
                   }
               } else if (actionParam == "rebroadcastCache") {
                   if (isOrganizerRequest) {
-                      sessionTokenTimestamp = millis(); // Refresh session
+                      sessionTokenTimestamp = millis();
                       int rebroadcastedCount = 0;
                       portENTER_CRITICAL(&seenMessagesMutex);
                       std::vector<esp_now_message_t> toRebroadcast;
@@ -645,7 +657,6 @@ void loop() {
               return;
             }
 
-            // --- HTML Page Rendering ---
             std::map<String, unsigned long> uniqueRecentMacsMap; 
             portENTER_CRITICAL(&seenMessagesMutex);
             for (const auto& seenMsg : seenMessages) {
@@ -781,11 +792,10 @@ void loop() {
             }
             if (currentLine.startsWith("Content-Length: ")) {
               contentLength = currentLine.substring(16).toInt();
-              // DOS FIX: Limit content length to a reasonable size to prevent memory exhaustion
               if (contentLength > 2048) {
                   Serial.printf("Error: Excessive Content-Length (%d). Closing connection to prevent DoS.\n", contentLength);
                   client.stop();
-                  return; // Abort processing this client
+                  return;
               }
             }
             currentLine = "";
