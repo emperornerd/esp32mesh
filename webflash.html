@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>ESP32 Web Flasher (No CSP, No Drama)</title>
+  <title>ESP32 Web Flasher (Local Bundle + Verbose)</title>
   <style>
     body {
       font-family: Arial, sans-serif;
@@ -15,6 +15,7 @@
       font-size: 16px;
       margin: 10px;
       padding: 10px 20px;
+      cursor: pointer;
     }
     #log {
       background: #000;
@@ -33,76 +34,99 @@
   </style>
 </head>
 <body>
-  <h1>ESP32 Web Flasher</h1>
+  <h1>ESP32 Web Flasher (Local Bundle + Verbose)</h1>
   <p><strong>Firmware:</strong> <code>firmware.bin</code></p>
   <button id="connectBtn">🔌 Connect</button>
   <button id="flashBtn" disabled>⚡ Flash</button>
   <div id="log">Console output...</div>
 
-  <script type="module">
-    import { flash } from "./bundle.js";
+  <!-- Load your local bundle.js here -->
+  <script src="bundle.js"></script>
+
+  <script>
+    const logEl = document.getElementById('log');
+    const connectBtn = document.getElementById('connectBtn');
+    const flashBtn = document.getElementById('flashBtn');
 
     let port = null;
+    let chip = null;
     let firmware = null;
 
-    const logArea = document.getElementById("log");
-    const connectBtn = document.getElementById("connectBtn");
-    const flashBtn = document.getElementById("flashBtn");
+    function log(msg) {
+      const t = new Date().toLocaleTimeString();
+      logEl.textContent += `\n[${t}] ${msg}`;
+      logEl.scrollTop = logEl.scrollHeight;
+      console.log(msg);
+    }
 
-    const log = (msg) => {
-      const time = new Date().toLocaleTimeString();
-      const line = `[${time}] ${msg}`;
-      logArea.textContent += "\n" + line;
-      logArea.scrollTop = logArea.scrollHeight;
-      console.log(line);
-    };
+    log("📦 Page loaded");
 
-    // Fetch firmware
+    if (!('serial' in navigator)) {
+      log("❌ Web Serial API not supported.");
+      connectBtn.disabled = true;
+    }
+
+    // Load firmware locally from same folder
     fetch("firmware.bin")
       .then(res => {
-        if (!res.ok) throw new Error("Could not load firmware.bin");
+        log("📡 Fetching firmware.bin...");
+        if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
         return res.arrayBuffer();
       })
       .then(buf => {
         firmware = new Uint8Array(buf);
         log(`✅ firmware.bin loaded (${firmware.length} bytes)`);
       })
-      .catch(err => log("❌ Firmware error: " + err.message));
+      .catch(err => log("❌ Firmware load failed: " + err.message));
 
-    // Connect
     connectBtn.addEventListener("click", async () => {
       try {
         log("🔍 Requesting serial port...");
         port = await navigator.serial.requestPort();
-        log("✅ Port selected");
+        log("🖧 Port selected.");
 
         log("🔑 Opening port...");
         await port.open({ baudRate: 115200 });
-        log("✅ Port opened");
+        log("✅ Port opened.");
+
+        if (!window.ESPWebTools || !window.ESPWebTools.ESPLoader) {
+          log("❌ ESPWebTools or ESPLoader not found on window object.");
+          return;
+        }
+
+        log("⚙️ Creating ESPLoader instance...");
+        chip = new window.ESPWebTools.ESPLoader(port, false, log);
+
+        log("🔄 Initializing chip...");
+        await chip.initialize();
+        log("✅ Chip initialized.");
 
         flashBtn.disabled = false;
+        log("🚀 Ready to flash!");
       } catch (e) {
-        log("❌ Connect failed: " + e.message);
+        log("❌ Connect error: " + e.message);
       }
     });
 
-    // Flash
     flashBtn.addEventListener("click", async () => {
-      if (!firmware || !port) return log("⚠️ Firmware or port missing");
-
+      if (!firmware) {
+        log("⚠️ Firmware missing");
+        return;
+      }
+      if (!chip) {
+        log("⚠️ Chip not connected");
+        return;
+      }
       try {
         log("⚡ Flashing firmware...");
-        await flash({
-          port,
-          baudrate: 115200,
-          fileArray: [{ data: firmware, address: 0x1000 }],
-          eraseAll: true,
-          compress: true,
-          log
-        });
-        log("✅ Flash complete!");
-        await port.close();
-        log("🔌 Port closed");
+        await chip.flashData([{ data: firmware, address: 0x1000 }], true);
+        log("✅ Flash complete.");
+
+        log("🔌 Disconnecting...");
+        await chip.transport.disconnect();
+        log("🔌 Port disconnected.");
+
+        flashBtn.disabled = true;
       } catch (e) {
         log("❌ Flash error: " + e.message);
       }
