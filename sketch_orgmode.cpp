@@ -25,7 +25,7 @@ bool displayActive = false;
 // The plaintext password for organizer access. This will be hashed at runtime.
 const char* WEB_PASSWORD = "password";
 // Stores the SHA256 hash of WEB_PASSWORD, calculated at setup.
-uint8_t hashedOrganizerPassword[32];
+uint8_t hashedOrganizerPassword[32]; // Renamed from currentOrganizerPasswordHash
 
 const uint8_t trustedMACs[][6] = {
   {0x08, 0xA6, 0xF7, 0x47, 0xFA, 0xAD},    // MAC of node A (example, keep if correct for your setup)
@@ -66,6 +66,10 @@ unsigned long totalMessagesReceived = 0;
 unsigned long totalUrgentMessages = 0;
 
 unsigned long lastRebroadcast = 0; // Timestamp for last re-broadcast
+// NEW: Variable to track last display refresh time
+unsigned long lastDisplayRefresh = 0;
+// NEW: Constant for display refresh interval (10 seconds)
+const unsigned long DISPLAY_REFRESH_INTERVAL_MS = 10000;
 
 int counter = 1; // Still used for the initial auto message
 
@@ -190,6 +194,8 @@ void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_mes
   for (auto& msg : seenMessages) {
     if (msg.messageID == id && memcmp(msg.originalSenderMac, mac, 6) == 0) {
       msg.timestamp = currentTime;
+      // Update messageData in case TTL or content changed (e.g., re-broadcast with decremented TTL)
+      memcpy(&msg.messageData, &msgData, sizeof(esp_now_message_t)); // Ensure messageData is updated
       updated = true;
       break;
     }
@@ -228,25 +234,25 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
   memcpy(&incomingMessage, data, sizeof(esp_now_message_t));
   incomingMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0';
 
+  // If message has no TTL left upon arrival, discard it.
+  if (incomingMessage.ttl == 0) {
+      return;
+  }
+
+  // If already seen, update its timestamp to keep it fresh in cache, but don't re-process/re-queue
   if (isMessageSeen(incomingMessage.messageID, incomingMessage.originalSenderMac)) {
     addOrUpdateMessageToSeen(incomingMessage.messageID, incomingMessage.originalSenderMac, incomingMessage);
     return;
   }
 
+  // Add to seen messages (store the message with its current TTL)
   addOrUpdateMessageToSeen(incomingMessage.messageID, incomingMessage.originalSenderMac, incomingMessage);
 
   totalMessagesReceived++;
-  // The 'Urgent: ' check for totalUrgentMessages is handled in loop() for user messages,
-  // and for incoming mesh messages, it's just a general count.
-  // No specific priority handling for public/organizer messages here.
   if (String(incomingMessage.content).indexOf("Urgent: ") != -1) {
       totalUrgentMessages++;
   }
 
-
-  if (incomingMessage.ttl == 0) {
-      return;
-  }
 
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
   if (xQueueSendFromISR(messageQueue, &incomingMessage, &xHigherPriorityTaskWoken) != pdPASS) {
@@ -257,12 +263,13 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
   }
 }
 
-void sendToAllPeers(esp_now_message_t message) {
+// sendToAllPeers now takes a message by reference so its TTL can be decremented directly
+void sendToAllPeers(esp_now_message_t& message) { // Changed to pass by reference
   uint8_t currentMacBytes[6];
   memcpy(currentMacBytes, ourMacBytes, 6);
 
   if (message.ttl > 0) {
-      message.ttl--;
+      message.ttl--; // Decrement TTL here, as this is the point of sending (one hop)
   } else {
       Serial.println("Attempted to re-broadcast message with TTL 0. Skipping.");
       return;
@@ -273,6 +280,33 @@ void sendToAllPeers(esp_now_message_t message) {
       esp_now_send(trustedMACs[i], (uint8_t*)&message, sizeof(esp_now_message_t));
     }
   }
+}
+
+// Helper function to create and send an ESP-NOW message (plaintext)
+void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len) {
+  esp_now_message_t newMessage;
+  memset(&newMessage, 0, sizeof(newMessage));
+  newMessage.messageID = esp_random(); // Use esp_random for message ID
+  memcpy(newMessage.originalSenderMac, ourMacBytes, 6);
+  newMessage.ttl = MAX_TTL_HOPS; // Set initial TTL
+
+  // Copy plaintext data, ensuring null termination and max length
+  size_t len_to_copy = std::min(plaintext_data_len, (size_t)MAX_MESSAGE_CONTENT_LEN - 1);
+  strncpy(newMessage.content, plaintext_data, len_to_copy);
+  newMessage.content[len_to_copy] = '\0'; // Ensure null termination
+
+  // Send the message (sendToAllPeers will decrement TTL on 'newMessage' directly)
+  sendToAllPeers(newMessage);
+  totalMessagesSent++;
+
+  // Add to seen messages (newMessage now has its decremented TTL)
+  addOrUpdateMessageToSeen(newMessage.messageID, newMessage.originalSenderMac, newMessage);
+
+  // Update serial buffer for local display
+  String formattedMessage = "Node " + MAC_suffix_str + " - " + String(plaintext_data);
+  serialBuffer = formattedMessage + "\n" + serialBuffer;
+  if (serialBuffer.length() > 4000) serialBuffer = serialBuffer.substring(0, 4000);
+  Serial.println("Sending (Plaintext): " + formattedMessage);
 }
 
 void setup() {
@@ -346,6 +380,7 @@ void setup() {
 
   esp_now_register_recv_cb(onDataRecv);
 
+  // Initial auto-message
   esp_now_message_t autoMessage;
   memset(&autoMessage, 0, sizeof(autoMessage));
   autoMessage.messageID = esp_random();
@@ -408,6 +443,8 @@ void loop() {
 
     if (receivedMessage.ttl > 0) {
         sendToAllPeers(receivedMessage);
+        // After sending, receivedMessage now has its TTL decremented. Update cache.
+        addOrUpdateMessageToSeen(receivedMessage.messageID, receivedMessage.originalSenderMac, receivedMessage);
     } else {
         Serial.println("Message reached TTL limit, not re-broadcasting.");
     }
@@ -424,8 +461,9 @@ void loop() {
     }
     portEXIT_CRITICAL(&seenMessagesMutex);
 
-    for (const auto& msg : messagesToRebroadcast) {
-      sendToAllPeers(msg);
+    for (auto& msg : messagesToRebroadcast) { // Use auto& to allow modification of msg
+      sendToAllPeers(msg); // msg's TTL will be decremented here
+      // Update the TTL in the seenMessages cache for this message
       addOrUpdateMessageToSeen(msg.messageID, msg.originalSenderMac, msg);
     }
   }
@@ -531,7 +569,7 @@ void loop() {
             isOrganizerRequest = isOrganizerSessionValid(sessionTokenParam);
 
             if (isPost) {
-              String messageParam = "", passwordParam = "", urgentParam = "", actionParam = "";
+              String messageParam = "", passwordParam = "", urgentParam = "", actionParam = "", newPasswordParam = "";
               int messageStart = postBody.indexOf("message=");
               if (messageStart != -1) {
                 int messageEnd = postBody.indexOf('&', messageStart);
@@ -551,6 +589,13 @@ void loop() {
                 if (actionEnd == -1) actionEnd = postBody.length();
                 actionParam = postBody.substring(actionStart + 7, actionEnd);
               }
+              int newPasswordStart = postBody.indexOf("new_password=");
+              if (newPasswordStart != -1) {
+                  int newPasswordEnd = postBody.indexOf('&', newPasswordStart);
+                  if (newPasswordEnd == -1) newPasswordEnd = postBody.length();
+                  newPasswordParam = postBody.substring(newPasswordStart + 13, newPasswordEnd);
+              }
+
 
               messageParam.replace('+', ' ');
               String decodedMessage = "";
@@ -563,6 +608,19 @@ void loop() {
                   decodedMessage += messageParam.charAt(i);
                 }
               }
+
+              newPasswordParam.replace('+', ' ');
+              String decodedNewPassword = "";
+              for (int i = 0; i < newPasswordParam.length(); i++) {
+                if (newPasswordParam.charAt(i) == '%' && (i + 2) < newPasswordParam.length()) {
+                  char decodedChar = (char)strtol((newPasswordParam.substring(i + 1, i + 3)).c_str(), NULL, 16);
+                  decodedNewPassword += decodedChar;
+                  i += 2;
+                } else {
+                  decodedNewPassword += newPasswordParam.charAt(i);
+                }
+              }
+
 
               if (actionParam == "enterOrganizer") {
                   if (lockoutTime > 0 && millis() < lockoutTime) {
@@ -607,7 +665,7 @@ void loop() {
                   if (isOrganizerRequest) {
                       sessionTokenTimestamp = millis();
                       publicMessagingEnabled = !publicMessagingEnabled;
-                      webFeedbackMessage = "<p class='feedback' style='color:blue;'>Public messaging has been " + String(publicMessagingEnabled ? "ENABLED" : "DISABLED") + ".</p>";
+                      webFeedbackMessage = "<p class class='feedback' style='color:blue;'>Public messaging has been " + String(publicMessagingEnabled ? "ENABLED" : "DISABLED") + ".</p>";
                       esp_now_message_t commandMessage;
                       memset(&commandMessage, 0, sizeof(commandMessage));
                       commandMessage.messageID = esp_random();
@@ -645,7 +703,7 @@ void loop() {
                   if (!publicMessagingEnabled) {
                       webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Public messaging is disabled.</p>";
                   } else if (decodedMessage.length() == 0) {
-                      webFeedbackMessage = "<p class='feedback' style='color:orange;'>Please enter a message.</p>";
+                      webFeedbackMessage = "<p class class='feedback' style='color:orange;'>Please enter a message.</p>";
                   } else {
                       decodedMessage = "Public: " + decodedMessage;
                       if (decodedMessage.length() >= MAX_MESSAGE_CONTENT_LEN) {
@@ -662,14 +720,28 @@ void loop() {
                       std::vector<esp_now_message_t> toRebroadcast;
                       for (const auto& seenMsg : seenMessages) { if (seenMsg.messageData.ttl > 0) toRebroadcast.push_back(seenMsg.messageData); }
                       portEXIT_CRITICAL(&seenMessagesMutex);
-                      for (const auto& msg : toRebroadcast) {
-                          sendToAllPeers(msg);
-                          addOrUpdateMessageToSeen(msg.messageID, msg.originalSenderMac, msg);
+                      for (auto& msg : toRebroadcast) { // Use auto& to allow modification of msg
+                          sendToAllPeers(msg); // msg's TTL will be decremented here
+                          addOrUpdateMessageToSeen(msg.messageID, msg.originalSenderMac, msg); // Update cache with new TTL
                           rebroadcastedCount++;
                       }
                       webFeedbackMessage = "<p class='feedback' style='color:green;'>Re-broadcasted " + String(rebroadcastedCount) + " messages!</p>";
                   } else {
                       webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Invalid or expired session.</p>";
+                  }
+              } else if (actionParam == "setOrganizerPassword") {
+                  if (isOrganizerRequest) {
+                      sessionTokenTimestamp = millis();
+                      if (decodedNewPassword.length() == 0) {
+                          webFeedbackMessage = "<p class='feedback' style='color:orange;'>New password cannot be empty.</p>";
+                      } else {
+                          calculateSHA256(decodedNewPassword.c_str(), hashedOrganizerPassword);
+                          webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer password updated successfully!</p>";
+                          loginAttempts = 0; // Reset login attempts on successful password change
+                          lockoutTime = 0;
+                      }
+                  } else {
+                      webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Invalid or expired session to change password.</p>";
                   }
               }
 
@@ -846,26 +918,42 @@ void loop() {
     strncpy(userEspNowMessage.content, userMessageBuffer.c_str(), MAX_MESSAGE_CONTENT_LEN);
     userEspNowMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0';
 
-    // Reverted: Only count "Urgent:" messages, not "Public: Urgent:" for totalUrgentMessages
     if (userMessageBuffer.startsWith("Urgent: ")) {
         totalUrgentMessages++;
     }
 
     String messageToSendFormatted = "User via Node " + MAC_suffix_str + " - " + userMessageBuffer;
 
+    sendToAllPeers(userEspNowMessage); // This will decrement TTL on userEspNowMessage
+    totalMessagesSent++;
+
+    // Add to seen messages (userEspNowMessage now has its decremented TTL)
     addOrUpdateMessageToSeen(userEspNowMessage.messageID, userEspNowMessage.originalSenderMac, userEspNowMessage);
+
 
     serialBuffer = messageToSendFormatted + "\n" + serialBuffer;
     Serial.println("Broadcasting (User): " + messageToSendFormatted);
-    totalMessagesSent++;
     if (serialBuffer.length() > 4000)
       serialBuffer = serialBuffer.substring(0, 4000);
-    sendToAllPeers(userEspNowMessage);
     messageProcessed = true;
     userMessageBuffer = "";
   }
 
 #if USE_DISPLAY
+  // Dedicated display refresh logic
+  if (millis() - lastDisplayRefresh >= DISPLAY_REFRESH_INTERVAL_MS) {
+    lastDisplayRefresh = millis();
+    if (currentDisplayMode == MODE_CHAT_LOG) {
+      displayChatLogMode(22);
+    } else if (currentDisplayMode == MODE_URGENT_ONLY) {
+      displayUrgentOnlyMode(22);
+    } else if (currentDisplayMode == MODE_DEVICE_INFO) {
+      displayDeviceInfoMode();
+    } else if (currentDisplayMode == MODE_STATS_INFO) {
+      displayStatsInfoMode();
+    }
+  }
+
   if (digitalRead(TFT_TOUCH_IRQ_PIN) == LOW && (millis() - lastTouchTime > TOUCH_DEBOUNCE_MS)) {
     lastTouchTime = millis();
     Serial.println("Touch detected! Switching display mode.");
@@ -884,18 +972,8 @@ void loop() {
       currentDisplayMode = MODE_CHAT_LOG;
       displayChatLogMode(22);
     }
-  }
-
-  if (messageProcessed) {
-    if (currentDisplayMode == MODE_CHAT_LOG) {
-      displayChatLogMode(22);
-    } else if (currentDisplayMode == MODE_URGENT_ONLY) {
-      displayUrgentOnlyMode(22);
-    } else if (currentDisplayMode == MODE_STATS_INFO) {
-      displayStatsInfoMode();
-    } else if (currentDisplayMode == MODE_DEVICE_INFO) {
-        displayDeviceInfoMode();
-    }
+    // Force a display refresh immediately after mode change
+    lastDisplayRefresh = 0; // Reset timer to trigger immediate refresh
   }
 #endif
 }
@@ -1015,6 +1093,7 @@ void displayStatsInfoMode() {
   tft.printf("  Cache Size: %u/%u\n", seenMessages.size(), MAX_CACHE_SIZE);
 
   tft.println("");
+  tft.println("Mode Status:");
   tft.printf("  Public Msgs: %s\n", publicMessagingEnabled ? "ENABLED" : "DISABLED");
 }
 #endif
