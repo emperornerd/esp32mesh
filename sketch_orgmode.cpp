@@ -2,13 +2,13 @@
 #include <esp_now.h>
 #include <esp_wifi.h> // Include for esp_wifi_set_channel
 #include <vector>     // For dynamic array for the cache
-#include <algorithm>  // For std::remove_if, std::min_element, std::sort
+#include <algorithm>  // For std::remove_if, std::min_element
 #include <string.h>   // For strncpy and memset
 #include <set>        // For storing unique MACs for display (used for logic to pick 4 unique)
 #include <map>        // For storing unique MACs with their last seen timestamp for sorting
 #include <DNSServer.h> // REQUIRED: Include for DNS server functionality
 #include <esp_system.h> // For esp_read_mac
-#include <esp_mac.h>    // For ESP_MAC_WIFI_STA // Corrected from esp_mac.g
+#include <esp_mac.h>    // For ESP_MAC_WIFI_STA
 #include <mbedtls/sha256.h> // For SHA256 hashing
 
 #define USE_DISPLAY true
@@ -23,9 +23,9 @@ bool displayActive = false;
 #endif
 
 // The plaintext password for organizer access. This will be hashed at runtime.
-const char* WEB_PASSWORD = "password"; 
+const char* WEB_PASSWORD = "password";
 // Stores the SHA256 hash of WEB_PASSWORD, calculated at setup.
-uint8_t hashedOrganizerPassword[32]; 
+uint8_t hashedOrganizerPassword[32];
 
 const uint8_t trustedMACs[][6] = {
   {0x08, 0xA6, 0xF7, 0x47, 0xFA, 0xAD},    // MAC of node A (example, keep if correct for your setup)
@@ -88,7 +88,7 @@ struct SeenMessage {
   uint32_t messageID;
   uint8_t originalSenderMac[6];
   unsigned long timestamp;
-  esp_now_message_t messageData;
+  esp_now_message_t messageData; // Store the full message data for re-broadcasting
 };
 
 std::vector<SeenMessage> seenMessages;
@@ -202,54 +202,14 @@ void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_mes
                                      }),
                       seenMessages.end());
 
-    // If cache is still full after removing expired messages, apply protection logic
+    // If cache is still full after removing expired messages, remove the oldest one
     if (seenMessages.size() >= MAX_CACHE_SIZE) {
-      // Identify the 5 most recent *organizer* messages from this node (not prefixed with "Public: ")
-      std::vector<SeenMessage*> ourRecentOrganizerMessages;
-      for (auto& msg : seenMessages) {
-        if (memcmp(msg.originalSenderMac, ourMacBytes, 6) == 0 && String(msg.messageData.content).indexOf("Public: ") == -1) {
-          ourRecentOrganizerMessages.push_back(&msg);
-        }
-      }
-      // Sort by timestamp descending to find the most recent
-      std::sort(ourRecentOrganizerMessages.begin(), ourRecentOrganizerMessages.end(),
-                [](const SeenMessage* a, const SeenMessage* b) {
-                    return a->timestamp > b->timestamp;
-                });
-
-      // Keep track of the IDs and MACs of the 5 most recent protected organizer messages
-      std::set<std::pair<uint32_t, String>> protectedOrganizerMessageKeys;
-      for (size_t i = 0; i < std::min((size_t)5, ourRecentOrganizerMessages.size()); ++i) {
-          protectedOrganizerMessageKeys.insert({ourRecentOrganizerMessages[i]->messageID, formatMac(ourRecentOrganizerMessages[i]->originalSenderMac)});
-      }
-
-      // Find the oldest message that is NOT one of the protected organizer messages
-      auto oldestUnprotected = seenMessages.end();
-      unsigned long oldestUnprotectedTimestamp = ULONG_MAX;
-
-      for (auto it = seenMessages.begin(); it != seenMessages.end(); ++it) {
-          // Check if this message is NOT in the protected set
-          if (protectedOrganizerMessageKeys.find({it->messageID, formatMac(it->originalSenderMac)}) == protectedOrganizerMessageKeys.end()) {
-              if (it->timestamp < oldestUnprotectedTimestamp) {
-                  oldestUnprotectedTimestamp = it->timestamp;
-                  oldestUnprotected = it;
-              }
-          }
-      }
-
-      if (oldestUnprotected != seenMessages.end()) {
-          // Remove the oldest unprotected message
-          seenMessages.erase(oldestUnprotected);
-      } else {
-          // All messages in cache are among the 5 most recent organizer messages (highly unlikely with MAX_CACHE_SIZE=50).
-          // Fallback: remove the absolute oldest message to prevent cache from growing indefinitely.
-          auto oldest = std::min_element(seenMessages.begin(), seenMessages.end(),
-                                         [](const SeenMessage& a, const SeenMessage& b) {
-                                             return a.timestamp < b.timestamp;
-                                         });
-          if (oldest != seenMessages.end()) {
-              seenMessages.erase(oldest);
-          }
+      auto oldest = std::min_element(seenMessages.begin(), seenMessages.end(),
+                                     [](const SeenMessage& a, const SeenMessage& b) {
+                                         return a.timestamp < b.timestamp;
+                                     });
+      if (oldest != seenMessages.end()) {
+        seenMessages.erase(oldest);
       }
     }
     SeenMessage newMessage = {id, {0}, currentTime, msgData};
@@ -272,16 +232,20 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
     addOrUpdateMessageToSeen(incomingMessage.messageID, incomingMessage.originalSenderMac, incomingMessage);
     return;
   }
-  
+
   addOrUpdateMessageToSeen(incomingMessage.messageID, incomingMessage.originalSenderMac, incomingMessage);
 
   totalMessagesReceived++;
+  // The 'Urgent: ' check for totalUrgentMessages is handled in loop() for user messages,
+  // and for incoming mesh messages, it's just a general count.
+  // No specific priority handling for public/organizer messages here.
   if (String(incomingMessage.content).indexOf("Urgent: ") != -1) {
       totalUrgentMessages++;
   }
 
+
   if (incomingMessage.ttl == 0) {
-      return; 
+      return;
   }
 
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
@@ -297,8 +261,8 @@ void sendToAllPeers(esp_now_message_t message) {
   uint8_t currentMacBytes[6];
   memcpy(currentMacBytes, ourMacBytes, 6);
 
-  if (message.ttl > 0) { 
-      message.ttl--; 
+  if (message.ttl > 0) {
+      message.ttl--;
   } else {
       Serial.println("Attempted to re-broadcast message with TTL 0. Skipping.");
       return;
@@ -313,7 +277,7 @@ void sendToAllPeers(esp_now_message_t message) {
 
 void setup() {
   Serial.begin(115200);
-  randomSeed(analogRead(0)); 
+  randomSeed(analogRead(0));
 
   publicMessagingEnabled = false;
 
@@ -331,8 +295,8 @@ void setup() {
 
   WiFi.softAP("placeholder", nullptr, WIFI_CHANNEL);
   delay(100);
-  MAC_full_str = WiFi.softAPmacAddress(); 
-  
+  MAC_full_str = WiFi.softAPmacAddress();
+
   sscanf(MAC_full_str.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X",
          (unsigned int*)&ourMacBytes[0], (unsigned int*)&ourMacBytes[1],
          (unsigned int*)&ourMacBytes[2], (unsigned int*)&ourMacBytes[3],
@@ -341,7 +305,7 @@ void setup() {
   MAC_suffix_str = getMacSuffix(ourMacBytes);
   ssid = "ProtestInfo_" + MAC_suffix_str;
 
-  WiFi.softAPConfig(apIP, apIP, netMsk); 
+  WiFi.softAPConfig(apIP, apIP, netMsk);
   WiFi.softAP(ssid.c_str(), nullptr, WIFI_CHANNEL);
   IP = WiFi.softAPIP();
   server.begin();
@@ -361,7 +325,7 @@ void setup() {
   tft.println("Starting node...");
   displayActive = true;
   Serial.println("Display initialized");
-  pinMode(TFT_TOUCH_IRQ_PIN, INPUT_PULLUP); 
+  pinMode(TFT_TOUCH_IRQ_PIN, INPUT_PULLUP);
   Serial.printf("T_IRQ pin set to INPUT_PULLUP on GPIO%d\n", TFT_TOUCH_IRQ_PIN);
   displayChatLogMode(22);
 #endif
@@ -383,14 +347,14 @@ void setup() {
   esp_now_register_recv_cb(onDataRecv);
 
   esp_now_message_t autoMessage;
-  memset(&autoMessage, 0, sizeof(autoMessage)); 
+  memset(&autoMessage, 0, sizeof(autoMessage));
   autoMessage.messageID = esp_random();
   memcpy(autoMessage.originalSenderMac, ourMacBytes, 6);
   autoMessage.ttl = MAX_TTL_HOPS;
-  
+
   char msgContentBuf[MAX_MESSAGE_CONTENT_LEN];
-  snprintf(msgContentBuf, sizeof(msgContentBuf), "Node %s initializing", MAC_suffix_str.c_str()); 
-  
+  snprintf(msgContentBuf, sizeof(msgContentBuf), "Node %s initializing", MAC_suffix_str.c_str());
+
   strncpy(autoMessage.content, msgContentBuf, sizeof(autoMessage.content));
   autoMessage.content[sizeof(autoMessage.content) - 1] = '\0';
 
@@ -435,14 +399,14 @@ void loop() {
     }
 
     String formattedIncoming = "Node " + originalSenderMacSuffix + " - " + incomingContent;
-    
+
     serialBuffer = formattedIncoming + "\n" + serialBuffer;
     if (serialBuffer.length() > 4000)
       serialBuffer = serialBuffer.substring(0, 4000);
     Serial.println("Message received from queue: " + formattedIncoming);
     messageProcessed = true;
-    
-    if (receivedMessage.ttl > 0) {  
+
+    if (receivedMessage.ttl > 0) {
         sendToAllPeers(receivedMessage);
     } else {
         Serial.println("Message reached TTL limit, not re-broadcasting.");
@@ -587,7 +551,7 @@ void loop() {
                 if (actionEnd == -1) actionEnd = postBody.length();
                 actionParam = postBody.substring(actionStart + 7, actionEnd);
               }
-              
+
               messageParam.replace('+', ' ');
               String decodedMessage = "";
               for (int i = 0; i < messageParam.length(); i++) {
@@ -599,7 +563,7 @@ void loop() {
                   decodedMessage += messageParam.charAt(i);
                 }
               }
-              
+
               if (actionParam == "enterOrganizer") {
                   if (lockoutTime > 0 && millis() < lockoutTime) {
                       webFeedbackMessage = "<p class='feedback' style='color:red;'>Too many failed attempts. Try again later.</p>";
@@ -611,7 +575,7 @@ void loop() {
                       // Hash the submitted password and compare to the stored hash
                       uint8_t submittedPasswordHash[32];
                       calculateSHA256(passwordParam.c_str(), submittedPasswordHash);
-                      
+
                       if (memcmp(submittedPasswordHash, hashedOrganizerPassword, 32) == 0) {
                           loginAttempts = 0;
                           organizerSessionToken = String(esp_random()) + String(esp_random());
@@ -721,7 +685,7 @@ void loop() {
               return;
             }
 
-            std::map<String, unsigned long> uniqueRecentMacsMap; 
+            std::map<String, unsigned long> uniqueRecentMacsMap;
             portENTER_CRITICAL(&seenMessagesMutex);
             for (const auto& seenMsg : seenMessages) {
                 String fullMacStr = formatMac(seenMsg.originalSenderMac);
@@ -775,9 +739,9 @@ void loop() {
             client.println(F("</style></head><body><header><h1>Protest Information Node</h1>"));
             client.printf("<p class='info-line'><strong>IP:</strong> %s | <strong>MAC:</strong> %s</p></header>", IP.toString().c_str(), MAC_suffix_str.c_str());
             client.println(F("<div class='content-wrapper'><div class='chat-main-content'>"));
-            
+
             if (webFeedbackMessage.length() > 0) { client.println(webFeedbackMessage); webFeedbackMessage = ""; }
-            
+
             bool showPublicView = (requestedPath.indexOf("?show_public=true") != -1);
             String displayedBuffer;
             String tempBuffer = serialBuffer;
@@ -787,8 +751,8 @@ void loop() {
                 if(lineEnd == -1) lineEnd = tempBuffer.length();
                 String line = tempBuffer.substring(lineStart, lineEnd);
                 if(line.indexOf("- Public: ") != -1 && !showPublicView) { /* skip */ }
-                else { 
-                    displayedBuffer += escapeHtml(line) + "\n"; 
+                else {
+                    displayedBuffer += escapeHtml(line) + "\n";
                 }
                 lineStart = lineEnd + 1;
             }
@@ -811,7 +775,7 @@ void loop() {
                 client.println(F("<label for='msg_input'>Message:</label><input type='text' id='msg_input' name='message' required maxlength='226'>"));
                 client.println(F("<div style='display:flex;align-items:center;justify-content:center;width:80%;margin-bottom:10px;'><input type='checkbox' id='urgent_input' name='urgent' value='on' style='margin-right:8px;'><label for='urgent_input' style='margin-bottom:0;'>Urgent</label></div>"));
                 client.println(F("<input type='submit' value='Send Message'></form></div>"));
-                
+
                 client.println(F("<div class='form-container' style='box-shadow:none;border:none;padding-top:5px;margin-top:5px;'><h3>Admin Actions</h3>"));
                 client.println(F("<form action='/' method='POST' style='flex-direction:row;justify-content:center;gap:10px;'>"));
                 client.println(F("<input type='hidden' name='action' value='rebroadcastCache'>"));
@@ -839,7 +803,7 @@ void loop() {
                     client.println(F("<input type='submit' value='Send Public Message'></form></div></details>"));
                 }
             }
-            
+
             client.print(detectedNodesHtmlContent);
             client.println(F("</div></div></body></html>"));
             break;
@@ -874,20 +838,21 @@ void loop() {
 
   if (userMessageBuffer.length() > 0) {
     esp_now_message_t userEspNowMessage;
-    memset(&userEspNowMessage, 0, sizeof(userEspNowMessage)); 
+    memset(&userEspNowMessage, 0, sizeof(userEspNowMessage));
     userEspNowMessage.messageID = esp_random();
     memcpy(userEspNowMessage.originalSenderMac, ourMacBytes, 6);
     userEspNowMessage.ttl = MAX_TTL_HOPS;
-    
+
     strncpy(userEspNowMessage.content, userMessageBuffer.c_str(), MAX_MESSAGE_CONTENT_LEN);
     userEspNowMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0';
 
-    if (userMessageBuffer.startsWith("Urgent: ") || userMessageBuffer.startsWith("Public: Urgent: ")) { 
-        totalUrgentMessages++; 
+    // Reverted: Only count "Urgent:" messages, not "Public: Urgent:" for totalUrgentMessages
+    if (userMessageBuffer.startsWith("Urgent: ")) {
+        totalUrgentMessages++;
     }
-    
+
     String messageToSendFormatted = "User via Node " + MAC_suffix_str + " - " + userMessageBuffer;
-    
+
     addOrUpdateMessageToSeen(userEspNowMessage.messageID, userEspNowMessage.originalSenderMac, userEspNowMessage);
 
     serialBuffer = messageToSendFormatted + "\n" + serialBuffer;
@@ -962,14 +927,14 @@ void displayUrgentOnlyMode(int numLines) {
   tft.setTextColor(TFT_GREEN);     tft.println("IP: " + IP.toString());
   tft.setTextColor(TFT_GREEN);        tft.println("Mode: Urgent Only");
   tft.setTextColor(TFT_WHITE);     tft.println("----------------------");
-  
+
   int linesPrinted = 0;
   int lineStart = 0;
   while (linesPrinted < numLines && lineStart < serialBuffer.length()) {
     int lineEnd = serialBuffer.indexOf('\n', lineStart);
     if (lineEnd == -1) lineEnd = serialBuffer.length();
     String line = serialBuffer.substring(lineStart, lineEnd);
-    
+
     if (line.indexOf("Urgent: ") != -1) {
       tft.println(line);
       linesPrinted++;
@@ -984,12 +949,12 @@ void displayDeviceInfoMode() {
   tft.setTextColor(TFT_GREEN);      tft.println("MAC: " + MAC_full_str);
   tft.setTextColor(TFT_GREEN);     tft.println("IP: " + IP.toString());
   tft.setTextColor(TFT_GREEN);      tft.println("Mode: Device Info");
-  
+
   tft.setTextColor(TFT_WHITE);     tft.println("----------------------");
   tft.println("Nearby Nodes (Last Seen):");
 
-  std::map<String, unsigned long> uniqueRecentMacsMap; 
-  uint8_t selfMacBytes[6]; 
+  std::map<String, unsigned long> uniqueRecentMacsMap;
+  uint8_t selfMacBytes[6];
   memcpy(selfMacBytes, ourMacBytes, 6);
 
   portENTER_CRITICAL(&seenMessagesMutex);
@@ -1009,7 +974,7 @@ void displayDeviceInfoMode() {
   std::sort(sortedUniqueMacs.begin(), sortedUniqueMacs.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
 
   int linesPrinted = 0;
-  const int MAX_NODES_TO_DISPLAY = 15; 
+  const int MAX_NODES_TO_DISPLAY = 15;
   if (sortedUniqueMacs.empty()) {
     tft.println("  No other nodes detected yet.");
   } else {
@@ -1017,7 +982,7 @@ void displayDeviceInfoMode() {
         if (linesPrinted >= MAX_NODES_TO_DISPLAY) break;
         uint8_t macBytes[6];
         sscanf(macPair.first.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", (unsigned int*)&macBytes[0], (unsigned int*)&macBytes[1], (unsigned int*)&macBytes[2], (unsigned int*)&macBytes[3], (unsigned int*)&macBytes[4], (unsigned int*)&macBytes[5]);
-        
+
         tft.printf("  %s (seen %lu s ago)\n", formatMaskedMac(macBytes).c_str(), (millis() - macPair.second) / 1000);
         linesPrinted++;
     }
@@ -1048,9 +1013,8 @@ void displayStatsInfoMode() {
   tft.printf("  Total Received: %lu\n", totalMessagesReceived);
   tft.printf("  Urgent Messages: %lu\n", totalUrgentMessages);
   tft.printf("  Cache Size: %u/%u\n", seenMessages.size(), MAX_CACHE_SIZE);
-  
+
   tft.println("");
-  tft.println("Mode Status:");
   tft.printf("  Public Msgs: %s\n", publicMessagingEnabled ? "ENABLED" : "DISABLED");
 }
 #endif
