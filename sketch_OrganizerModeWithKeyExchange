@@ -9,6 +9,8 @@
 #include <DNSServer.h> // REQUIRED: Include for DNS server functionality
 #include <esp_system.h> // For esp_read_mac
 #include <esp_mac.h>    // Corrected: Added .h for esp_mac
+#include <freertos/FreeRTOS.h> // Explicitly include FreeRTOS for queue types
+#include <freertos/queue.h>    // Explicitly include queue definitions
 // #include <mbedtls/sha256.h> // Removed for simpler hashing
 
 #define USE_DISPLAY true
@@ -21,6 +23,29 @@ bool displayActive = false;
 // Define the T_IRQ pin explicitly here for direct digitalRead debugging
 #define TFT_TOUCH_IRQ_PIN 36 // Example: Change to 39 if your board uses GPIO39 for T_IRQ
 #endif
+
+// Maximum content length for the message, allowing for null terminator after decryption.
+// Total message size: 4 (ID) + 6 (MAC) + 1 (TTL) + 1 (Type) + 238 (content array) = 250 bytes.
+#define MAX_MESSAGE_CONTENT_LEN 238 // Max actual content length
+#define MAX_TTL_HOPS 40 // Maximum Time-To-Live (hops) for a message
+
+// Message types for display prioritization
+#define MSG_TYPE_ORGANIZER 0
+#define MSG_TYPE_PUBLIC 1
+#define MSG_TYPE_AUTO_INIT 2
+#define MSG_TYPE_COMMAND 3
+#define MSG_TYPE_UNKNOWN 4 // Default for messages without explicit type
+
+// Placing esp_now_message_t definition early to ensure it's recognized by the compiler.
+// This uses the typedef struct syntax as provided in your original working code.
+typedef struct __attribute__((packed)) {
+  uint32_t messageID;
+  uint8_t originalSenderMac[6];
+  uint8_t ttl;
+  uint8_t messageType; // Field to identify message type (organizer, public, etc.)
+  char content[MAX_MESSAGE_CONTENT_LEN]; // Fixed size content buffer
+} esp_now_message_t;
+
 
 // The plaintext password for organizer access. This will be hashed at runtime.
 const char* WEB_PASSWORD = "password";
@@ -89,29 +114,51 @@ IPAddress netMsk(255, 255, 255, 0);
 
 DNSServer dnsServer;
 
-#define MAX_MESSAGE_CONTENT_LEN 238 // 250 (max ESP-NOW) - 4 (ID) - 6 (MAC) - 1 (TTL) - 1 (Type) = 238
-#define MAX_TTL_HOPS 40 // Maximum Time-To-Live (hops) for a message
+// Define a Pre-Shared Key (PSK) for symmetric encryption
+// This key must be identical on all participating nodes.
+// For simplicity and to meet "fully embedded", it's hardcoded.
+// In a real-world scenario, this would be provisioned securely.
+const uint8_t PRE_SHARED_KEY[] = {
+  0x1A, 0x2B, 0x3C, 0x4D, 0x5E, 0x6F, 0x70, 0x81,
+  0x92, 0xA3, 0xB4, 0xC5, 0xD6, 0xE7, 0xF8, 0x09
+};
+const size_t PRE_SHARED_KEY_LEN = sizeof(PRE_SHARED_KEY);
 
-// Message types for display prioritization
-#define MSG_TYPE_ORGANIZER 0
-#define MSG_TYPE_PUBLIC 1
-#define MSG_TYPE_AUTO_INIT 2
-#define MSG_TYPE_COMMAND 3
-#define MSG_TYPE_UNKNOWN 4 // Default for messages without explicit type
+// Simple PRNG state for the stream cipher
+uint32_t prng_state;
 
-typedef struct __attribute__((packed)) {
-  uint32_t messageID;
-  uint8_t originalSenderMac[6];
-  uint8_t ttl;
-  uint8_t messageType; // Field to identify message type (organizer, public, etc.)
-  char content[MAX_MESSAGE_CONTENT_LEN];
-} esp_now_message_t;
+// Function to seed the PRNG
+void seedPrng(const uint8_t* key, size_t keyLen) {
+    prng_state = 0;
+    for (size_t i = 0; i < keyLen; ++i) {
+        prng_state = (prng_state << 8) | key[i]; // Combine key bytes into seed
+    }
+    if (prng_state == 0) prng_state = 1; // Avoid zero seed
+}
+
+// Function to get next PRNG byte
+uint8_t getPrngByte() {
+    // Simple Linear Congruential Generator (LCG) parameters
+    // These are NOT cryptographically secure, but provide a different stream.
+    prng_state = (1103515245 * prng_state + 12345); 
+    return (uint8_t)(prng_state >> 24); // Take higher bits for better distribution
+}
+
+// Stream cipher encryption/decryption using PRNG
+// This function performs XOR operation with a PRNG-generated keystream in-place.
+void prngStreamCipher(uint8_t* data, size_t dataLen, const uint8_t* key, size_t keyLen) {
+    seedPrng(key, keyLen); // Seed PRNG for each operation to ensure determinism
+    for (size_t i = 0; i < dataLen; i++) {
+        data[i] = data[i] ^ getPrngByte();
+    }
+}
+
 
 struct SeenMessage {
   uint32_t messageID;
   uint8_t originalSenderMac[6];
   unsigned long timestamp;
-  esp_now_message_t messageData; // Store the full message data for re-broadcasting
+  esp_now_message_t messageData; // Store the full message data (encrypted) for re-broadcasting
 };
 
 std::vector<SeenMessage> seenMessages;
@@ -127,7 +174,7 @@ QueueHandle_t messageQueue;
 
 // Struct to hold messages for local display, including timestamp for sorting
 struct LocalDisplayEntry {
-    esp_now_message_t message;
+    esp_now_message_t message; // This message will be stored in its decrypted form
     unsigned long timestamp; // Timestamp when this message was added to localDisplayLog
 };
 std::vector<LocalDisplayEntry> localDisplayLog;
@@ -273,7 +320,10 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
   esp_now_message_t incomingMessage;
   memset(&incomingMessage, 0, sizeof(esp_now_message_t));
   memcpy(&incomingMessage, data, sizeof(esp_now_message_t));
-  incomingMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0';
+  
+  // Decrypt the content after receiving
+  prngStreamCipher((uint8_t*)incomingMessage.content, MAX_MESSAGE_CONTENT_LEN, PRE_SHARED_KEY, PRE_SHARED_KEY_LEN);
+  incomingMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0'; // Ensure null termination after decryption
 
   // If message has no TTL left upon arrival, discard it.
   if (incomingMessage.ttl == 0) {
@@ -290,7 +340,14 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
 
   // Always update the seen message cache first. This ensures the message's timestamp
   // is refreshed and its "full TTL potential" version is stored if new.
-  addOrUpdateMessageToSeen(incomingMessage.messageID, incomingMessage.originalSenderMac, incomingMessage);
+  // Note: The message stored in cache will be the *encrypted* version with MAX_TTL_HOPS,
+  // as addOrUpdateMessageToSeen copies the provided msgData and resets its TTL.
+  // So, we need to pass the *encrypted* version to the cache.
+  // To do this, we re-encrypt the incomingMessage before passing it to the cache.
+  esp_now_message_t encryptedForCache = incomingMessage; // Create a copy
+  prngStreamCipher((uint8_t*)encryptedForCache.content, MAX_MESSAGE_CONTENT_LEN, PRE_SHARED_KEY, PRE_SHARED_KEY_LEN); // Re-encrypt for cache
+  addOrUpdateMessageToSeen(encryptedForCache.messageID, encryptedForCache.originalSenderMac, encryptedForCache);
+
 
   // ONLY queue the message for local processing/display if it's truly new to this node.
   // If `wasAlreadySeen` is true, it means this node has already processed it for display
@@ -301,14 +358,20 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
           totalUrgentMessages++;
       }
 
-      // Add to local display log
+      // Add to local display log (decrypted version)
       portENTER_CRITICAL(&localDisplayLogMutex);
       LocalDisplayEntry newEntry = {incomingMessage, millis()}; // Store message and its reception timestamp
       localDisplayLog.push_back(newEntry);
       portEXIT_CRITICAL(&localDisplayLogMutex);
 
+      // Queue the *encrypted* message for further re-broadcasting by the main loop
+      // We need to re-encrypt it here because incomingMessage was decrypted for local use.
+      // The message that goes into the queue for re-broadcasting must be encrypted.
+      esp_now_message_t encryptedForQueue = incomingMessage;
+      prngStreamCipher((uint8_t*)encryptedForQueue.content, MAX_MESSAGE_CONTENT_LEN, PRE_SHARED_KEY, PRE_SHARED_KEY_LEN);
+      
       BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-      if (xQueueSendFromISR(messageQueue, &incomingMessage, &xHigherPriorityTaskWoken) != pdPASS) {
+      if (xQueueSendFromISR(messageQueue, &encryptedForQueue, &xHigherPriorityTaskWoken) != pdPASS) {
         // Message dropped
       }
       if (xHigherPriorityTaskWoken == pdTRUE) {
@@ -334,6 +397,7 @@ void sendToAllPeers(esp_now_message_t& message) { // Changed to pass by referenc
     // The previous condition `&& memcmp(trustedMACs[i], currentMacBytes, 6) != 0` was removed
     // as trustedMACs[i] should never be currentMacBytes (our own MAC) if peers are set up correctly.
     if (memcmp(trustedMACs[i], message.originalSenderMac, 6) != 0) {
+      // The message content is already encrypted when it reaches here.
       esp_now_send(trustedMACs[i], (uint8_t*)&message, sizeof(esp_now_message_t));
     }
   }
@@ -351,7 +415,10 @@ void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len,
   // Copy plaintext data, ensuring null termination and max length
   size_t len_to_copy = std::min(plaintext_data_len, (size_t)MAX_MESSAGE_CONTENT_LEN - 1);
   strncpy(newMessage.content, plaintext_data, len_to_copy);
-  newMessage.content[len_to_copy] = '\0'; // Ensure null termination
+  newMessage.content[len_to_copy] = '\0'; // Ensure null termination for plaintext
+
+  // Encrypt the message content before sending
+  prngStreamCipher((uint8_t*)newMessage.content, MAX_MESSAGE_CONTENT_LEN, PRE_SHARED_KEY, PRE_SHARED_KEY_LEN);
 
   // Send the message (sendToAllPeers will decrement TTL on 'newMessage' directly)
   sendToAllPeers(newMessage);
@@ -364,7 +431,12 @@ void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len,
 
   // Add to local display log IMMEDIATELY for originating node
   portENTER_CRITICAL(&localDisplayLogMutex);
-  LocalDisplayEntry newEntry = {newMessage, millis()}; // Store message and its creation timestamp
+  // Decrypt for local display immediately after sending (so it appears as plaintext on sender's display)
+  // Create a copy to decrypt for local display without altering the 'newMessage' that was sent.
+  esp_now_message_t displayMessage = newMessage;
+  prngStreamCipher((uint8_t*)displayMessage.content, MAX_MESSAGE_CONTENT_LEN, PRE_SHARED_KEY, PRE_SHARED_KEY_LEN); // Decrypt for display
+  displayMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0'; // Ensure null termination
+  LocalDisplayEntry newEntry = {displayMessage, millis()}; // Store message and its creation timestamp
   localDisplayLog.push_back(newEntry);
   portEXIT_CRITICAL(&localDisplayLogMutex);
 
@@ -482,7 +554,7 @@ void setup() {
     esp_now_peer_info_t peer{};
     memcpy(peer.peer_addr, trustedMACs[i], 6);
     peer.channel = WIFI_CHANNEL;
-    peer.encrypt = false;
+    peer.encrypt = false; // Explicitly set to false as we're using custom encryption
     esp_now_add_peer(&peer);
   }
 
@@ -501,10 +573,10 @@ void setup() {
 void loop() {
   dnsServer.processNextRequest();
 
-  esp_now_message_t receivedMessage;
+  esp_now_message_t receivedMessage; // This message is already decrypted by onDataRecv
   bool messageProcessed = false;
   while (xQueueReceive(messageQueue, &receivedMessage, 0) == pdPASS) {
-    receivedMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0';
+    receivedMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0'; // Ensure null termination
     String incomingContent = String(receivedMessage.content);
     String originalSenderMacSuffix = getMacSuffix(receivedMessage.originalSenderMac);
 
@@ -527,16 +599,14 @@ void loop() {
     Serial.println("Message received from queue: Node " + originalSenderMacSuffix + " - " + incomingContent);
     messageProcessed = true;
 
-    // IMPORTANT: When re-broadcasting from the queue, use the TTL from the received message.
-    // The cache only stores the message with MAX_TTL_HOPS for its re-broadcast potential
-    // during the auto-rebroadcast cycle. For immediate re-broadcast from a received message,
-    // we respect its current TTL to prevent infinite loops from a single received packet.
+    // IMPORTANT: When re-broadcasting from the queue, we need to send the *encrypted* version.
+    // The message in `receivedMessage` from the queue is currently decrypted.
+    // We also need to respect its current TTL.
     if (receivedMessage.ttl > 0) {
-        sendToAllPeers(receivedMessage);
-        // After sending, receivedMessage now has its TTL decremented. Update cache.
-        // Note: addOrUpdateMessageToSeen will store the message with MAX_TTL_HOPS
-        // when it's first seen, regardless of its incoming TTL.
-        addOrUpdateMessageToSeen(receivedMessage.messageID, receivedMessage.originalSenderMac, receivedMessage);
+        esp_now_message_t encryptedForRebroadcast = receivedMessage; // Create a copy
+        prngStreamCipher((uint8_t*)encryptedForRebroadcast.content, MAX_MESSAGE_CONTENT_LEN, PRE_SHARED_KEY, PRE_SHARED_KEY_LEN); // Encrypt for re-broadcast
+        sendToAllPeers(encryptedForRebroadcast);
+        // No need to addOrUpdateMessageToSeen here, as it was already added when received.
     } else {
         Serial.println("Message reached TTL limit, not re-broadcasting.");
     }
@@ -551,7 +621,7 @@ void loop() {
       // should already be MAX_TTL_HOPS due to the change in addOrUpdateMessageToSeen.
       // We still check > 0, though it should always be.
       if (seenMsg.messageData.ttl > 0) {
-        messagesToRebroadcast.push_back(seenMsg.messageData);
+        messagesToRebroadcast.push_back(seenMsg.messageData); // These are already encrypted in cache
       }
     }
     portEXIT_CRITICAL(&seenMessagesMutex);
@@ -853,7 +923,7 @@ void loop() {
                           webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer message queued!</p>";
                       }
                   } else {
-                      webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Invalid or expired session.</p>";
+                      webFeedbackMessage = "<p class class='feedback' style='color:red;'>Error: Invalid or expired session.</p>";
                   }
               } else if (actionParam == "sendPublicMessage") {
                   if (!publicMessagingEnabled) {
