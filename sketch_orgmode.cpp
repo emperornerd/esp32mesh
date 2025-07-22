@@ -9,6 +9,7 @@
 #include <DNSServer.h> // REQUIRED: Include for DNS server functionality
 #include <esp_system.h> // For esp_read_mac
 #include <esp_mac.h>    // For ESP_MAC_WIFI_STA // Corrected from esp_mac.g
+#include <mbedtls/sha256.h> // For SHA256 hashing
 
 #define USE_DISPLAY true
 
@@ -21,7 +22,10 @@ bool displayActive = false;
 #define TFT_TOUCH_IRQ_PIN 36 // Example: Change to 39 if your board uses GPIO39 for T_IRQ
 #endif
 
-const char* WEB_PASSWORD = "password"; // The password for accessing the message input
+// The plaintext password for organizer access. This will be hashed at runtime.
+const char* WEB_PASSWORD = "password"; 
+// Stores the SHA256 hash of WEB_PASSWORD, calculated at setup.
+uint8_t hashedOrganizerPassword[32]; 
 
 const uint8_t trustedMACs[][6] = {
   {0x08, 0xA6, 0xF7, 0x47, 0xFA, 0xAD},    // MAC of node A (example, keep if correct for your setup)
@@ -115,6 +119,16 @@ void displayDeviceInfoMode();
 void displayStatsInfoMode();
 #endif
 
+// Helper function to calculate SHA256 hash
+void calculateSHA256(const char* input, uint8_t* output) {
+    mbedtls_sha256_context ctx;
+    mbedtls_sha256_init(&ctx);
+    mbedtls_sha256_starts(&ctx, 0); // 0 for SHA256
+    mbedtls_sha256_update(&ctx, (const unsigned char*)input, strlen(input));
+    mbedtls_sha256_finish(&ctx, output);
+    mbedtls_sha256_free(&ctx);
+}
+
 String formatMac(const uint8_t *mac) {
   char buf[18];
   snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -181,18 +195,61 @@ void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_mes
     }
   }
   if (!updated) {
+    // Remove messages older than DEDUP_CACHE_DURATION_MS first
     seenMessages.erase(std::remove_if(seenMessages.begin(), seenMessages.end(),
                                      [currentTime](const SeenMessage& msg) {
                                          return (currentTime - msg.timestamp) > DEDUP_CACHE_DURATION_MS;
                                      }),
                       seenMessages.end());
+
+    // If cache is still full after removing expired messages, apply protection logic
     if (seenMessages.size() >= MAX_CACHE_SIZE) {
-      auto oldest = std::min_element(seenMessages.begin(), seenMessages.end(),
-                                     [](const SeenMessage& a, const SeenMessage& b) {
-                                         return a.timestamp < b.timestamp;
-                                     });
-      if (oldest != seenMessages.end()) {
-          seenMessages.erase(oldest);
+      // Identify the 5 most recent *organizer* messages from this node (not prefixed with "Public: ")
+      std::vector<SeenMessage*> ourRecentOrganizerMessages;
+      for (auto& msg : seenMessages) {
+        if (memcmp(msg.originalSenderMac, ourMacBytes, 6) == 0 && String(msg.messageData.content).indexOf("Public: ") == -1) {
+          ourRecentOrganizerMessages.push_back(&msg);
+        }
+      }
+      // Sort by timestamp descending to find the most recent
+      std::sort(ourRecentOrganizerMessages.begin(), ourRecentOrganizerMessages.end(),
+                [](const SeenMessage* a, const SeenMessage* b) {
+                    return a->timestamp > b->timestamp;
+                });
+
+      // Keep track of the IDs and MACs of the 5 most recent protected organizer messages
+      std::set<std::pair<uint32_t, String>> protectedOrganizerMessageKeys;
+      for (size_t i = 0; i < std::min((size_t)5, ourRecentOrganizerMessages.size()); ++i) {
+          protectedOrganizerMessageKeys.insert({ourRecentOrganizerMessages[i]->messageID, formatMac(ourRecentOrganizerMessages[i]->originalSenderMac)});
+      }
+
+      // Find the oldest message that is NOT one of the protected organizer messages
+      auto oldestUnprotected = seenMessages.end();
+      unsigned long oldestUnprotectedTimestamp = ULONG_MAX;
+
+      for (auto it = seenMessages.begin(); it != seenMessages.end(); ++it) {
+          // Check if this message is NOT in the protected set
+          if (protectedOrganizerMessageKeys.find({it->messageID, formatMac(it->originalSenderMac)}) == protectedOrganizerMessageKeys.end()) {
+              if (it->timestamp < oldestUnprotectedTimestamp) {
+                  oldestUnprotectedTimestamp = it->timestamp;
+                  oldestUnprotected = it;
+              }
+          }
+      }
+
+      if (oldestUnprotected != seenMessages.end()) {
+          // Remove the oldest unprotected message
+          seenMessages.erase(oldestUnprotected);
+      } else {
+          // All messages in cache are among the 5 most recent organizer messages (highly unlikely with MAX_CACHE_SIZE=50).
+          // Fallback: remove the absolute oldest message to prevent cache from growing indefinitely.
+          auto oldest = std::min_element(seenMessages.begin(), seenMessages.end(),
+                                         [](const SeenMessage& a, const SeenMessage& b) {
+                                             return a.timestamp < b.timestamp;
+                                         });
+          if (oldest != seenMessages.end()) {
+              seenMessages.erase(oldest);
+          }
       }
     }
     SeenMessage newMessage = {id, {0}, currentTime, msgData};
@@ -265,6 +322,9 @@ void setup() {
     Serial.println("Failed to create message queue!");
     while(true) { delay(100); }
   }
+
+  // Calculate the SHA256 hash of the WEB_PASSWORD at startup
+  calculateSHA256(WEB_PASSWORD, hashedOrganizerPassword);
 
   WiFi.mode(WIFI_AP_STA);
   WiFi.setSleep(false);
@@ -548,7 +608,11 @@ void loop() {
                           lockoutTime = 0;
                           loginAttempts = 0;
                       }
-                      if (passwordParam == WEB_PASSWORD) {
+                      // Hash the submitted password and compare to the stored hash
+                      uint8_t submittedPasswordHash[32];
+                      calculateSHA256(passwordParam.c_str(), submittedPasswordHash);
+                      
+                      if (memcmp(submittedPasswordHash, hashedOrganizerPassword, 32) == 0) {
                           loginAttempts = 0;
                           organizerSessionToken = String(esp_random()) + String(esp_random());
                           sessionTokenTimestamp = millis();
