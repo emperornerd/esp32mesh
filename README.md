@@ -1,20 +1,26 @@
 Protest Information Node
 This project implements a decentralized, local communication network designed for sharing information in environments where traditional internet or cellular services might be unavailable or unreliable. Each device acts as a node in a self-organizing mesh, enabling communication without a central server.
 
-What It Does (For Everyone)
+Features
 The Protest Information Node provides a robust way for people to share messages locally:
 
-Offline Communication: It works completely without internet access, creating its own local network.
+Offline Communication: Operates entirely without internet access, creating its own local Wi-Fi network.
 
-Public Messages: Anyone connected to a node's Wi-Fi can view messages. Public message sending is off by default and must be enabled by an organizer.
+Public Message Viewing: Anyone connected to a node's Wi-Fi can view received messages.
 
-Organizer Messages: Authorized organizers can send important, prioritized messages, including "Urgent" alerts, and manage the network's settings.
+Organizer Messaging: Authorized organizers can send important, prioritized messages, including "Urgent" alerts.
 
-Message Sharing: Messages automatically spread from node to node, extending the reach of communication across the local area.
+Public Message Sending: Users can send public messages, but this feature is off by default and must be enabled by an organizer.
 
-Local Display: If a screen is attached, it can show messages directly, including urgent ones, and basic device information.
+Message Mesh Propagation: Messages automatically spread from node to node, extending communication reach across the local area.
 
-Flashing with Arduino IDE (For Setup)
+Local Display: If a TFT screen is attached, it can directly show messages (all or urgent only), device information, and network statistics.
+
+Web Interface (SoftAP): Each node hosts a local web interface accessible via its Wi-Fi network, providing message logs and control options.
+
+Organizer Mode Controls: Authenticated organizers can manage network settings, including toggling public messaging, re-broadcasting message caches, and setting the initial organizer password.
+
+Getting Started (Flashing Firmware)
 To upload the code to your ESP32 board using the Arduino IDE:
 
 Install Arduino IDE: Download and install the Arduino IDE from the official website.
@@ -33,7 +39,7 @@ Install Libraries:
 
 Go to Sketch > Include Library > Manage Libraries...
 
-Search for and install TFT_eSPI (if USE_DISPLAY is true in the code).
+Search for and install TFT_eSPI (only required if USE_DISPLAY is set to true in the code).
 
 Open Project: Open the .ino file (this code) in Arduino IDE.
 
@@ -43,41 +49,33 @@ Select Port: Go to Tools > Port and select the serial port connected to your ESP
 
 Upload: Click the "Upload" button (right arrow icon) to compile and flash the code to your ESP32.
 
-Once flashed, the ESP32 will reboot and start its local Wi-Fi network and communication services.
+Once flashed, the ESP32 will reboot and automatically start its local Wi-Fi network and communication services.
 
-How to Use (Quick Start)
-After flashing and powering on a node, follow these steps to interact with it:
+How to Use (Quick Start Guide)
+After flashing and powering on a node, follow these steps to interact with its web interface:
 
-Connect to Wi-Fi: On your phone or computer, search for Wi-Fi networks. You will see a network named ProtestInfo_XXXX (where XXXX are the last four characters of the node's unique hardware address). Connect to this network. No password is required for the Wi-Fi itself.
+Connect to Wi-Fi: On your phone or computer, search for Wi-Fi networks. Connect to the network named ProtestInfo_XXXX (where XXXX are the last four characters of the node's unique hardware address). No password is required for the Wi-Fi connection itself.
 
-Access the Web Interface: Once connected, your device should automatically open a "captive portal" page. If not, open a web browser and try to navigate to any website (e.g., http://example.com). You will be redirected to the node's local web interface.
+Access the Web Interface: Your device should automatically open a "captive portal" page. If not, open a web browser and try to navigate to any website (e.g., http://example.com). You will be redirected to the node's local web interface.
 
-View Messages: The main page displays a log of all messages received by this node. You can use the filter buttons ("Show Public Messages" / "Hide Public Messages" and "Show Urgent Only" / "Show All Messages") to customize your view.
+View Messages: The main page displays a log of all messages received by this node. Use the filter buttons ("Show Public Messages" / "Hide Public Messages" and "Show Urgent Only" / "Show All Messages") to customize your view.
 
-Organizer Mode (Core Function):
+Access Organizer Mode: To unlock advanced features, find the "Enter Organizer Mode" section.
 
-To access the core functions of the node, find the "Enter Organizer Mode" section.
+Initial Setup: If this is a new node, you'll first be prompted to "Set Initial Organizer Password." Choose a strong password and confirm it. This password will then spread to all other connected nodes in the mesh. You only need to set the organizer password once across your network.
 
-Initial Setup: If this is a new node, you'll first be prompted to "Set Initial Organizer Password." Choose a strong password and confirm it. This password will then spread to all other connected nodes in the mesh. You only need to set the organizer password once across your network. Once set, this password cannot be changed through the web interface without physically rebooting the board for security reasons. This locking mechanism prevents unauthorized changes to the node's core settings after deployment.
+Logging In: After the password is set, use this section to log in as an organizer with your chosen password.
 
-Logging In: After the password is set, you'll use this section to log in as an organizer.
-
-Organizer Actions: Once logged in, you can send prioritized organizer messages, manually re-broadcast messages, and control the "Public Messaging Lock."
-
-Send Public Messages (Requires Organizer Enablement):
-
-Look for the "Send a Public Message" section.
-
-Public messaging is off by default. An organizer must enable it through "Organizer Mode" for this feature to become active. Once enabled, you can type your message and send it. These messages are shared with all connected nodes.
+Send Public Messages: Locate the "Send a Public Message" section. This feature is off by default. An organizer must enable it through "Organizer Mode." Once enabled, you can type and send messages that will be shared across all connected nodes.
 
 Understanding the Locking Mechanisms
-The system includes two important locking mechanisms designed for security and control:
+The system incorporates two important locking mechanisms for security and control:
 
 Organizer Password Lock: The organizer password for a node is set at runtime. Once a non-default password is set (either locally or received from another node), it becomes permanently locked for that session. This means the password cannot be changed through the web interface without physically rebooting the ESP32 board. Upon reboot, the organizer password for that specific board will reset to its default value ('password'). To truly reset the organizer password across an entire mesh (i.e., change it from a previously set non-default value to a new non-default value), all boards in the mesh must be powered off before setting the new password on a single board and then powering others back on. This ensures that the new password propagates without interference from other nodes still holding the old password. This mechanism ensures that once a node is deployed with a specific organizer password, it maintains that security setting, preventing unauthorized password changes over the air.
 
 Public Messaging Lock: An organizer has the ability to "Disable Public Msgs," which also "locks" public messaging off. This means that once public messaging is locked off by an organizer, it cannot be re-enabled through the web interface until the board is rebooted. This provides a critical control mechanism for organizers to shut down public communication if necessary, preventing its re-activation without physical intervention.
 
-Technical Details for Development
+Technical Details (For Developers)
 This section provides a deeper dive into the technical implementation for developers and those interested in the underlying mechanisms.
 
 ESP-NOW Mesh Network:
