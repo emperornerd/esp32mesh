@@ -11,7 +11,6 @@
 #include <esp_mac.h>    // Corrected: Added .h for esp_mac
 #include <freertos/FreeRTOS.h> // Explicitly include FreeRTOS for queue types
 #include <freertos/queue.h>    // Explicitly include queue definitions
-// #include <mbedtls/sha256.h> // Removed for simpler hashing
 
 #define USE_DISPLAY true
 
@@ -35,6 +34,7 @@ bool displayActive = false;
 #define MSG_TYPE_AUTO_INIT 2
 #define MSG_TYPE_COMMAND 3
 #define MSG_TYPE_UNKNOWN 4 // Default for messages without explicit type
+#define MSG_TYPE_DISCOVERY 5 // New message type for peer discovery
 
 // Placing esp_now_message_t definition early to ensure it's recognized by the compiler.
 // This uses the typedef struct syntax as provided in your original working code.
@@ -50,15 +50,15 @@ typedef struct __attribute__((packed)) {
 // The plaintext password for organizer access. This will be hashed at runtime.
 const char* WEB_PASSWORD = "password";
 // Stores the hash of WEB_PASSWORD, calculated at setup.
-// Changed from uint8_t array to String for simple hash
 String hashedOrganizerPassword; 
 
-const uint8_t trustedMACs[][6] = {
-  {0x08, 0xA6, 0xF7, 0x47, 0xFA, 0xAD},    // MAC of node A (example, keep if correct for your setup)
-  {0x14, 0x33, 0x5C, 0x6D, 0x74, 0x05},    // MAC of node B
-  {0x14, 0x33, 0x5C, 0x6C, 0x3A, 0x99}     // MAC of node C
-};
-const int numTrusted = sizeof(trustedMACs) / sizeof(trustedMACs[0]);
+// Removed: Hardcoded trustedMACs list. Peers will now be auto-discovered.
+// const uint8_t trustedMACs[][6] = {
+//   {0x08, 0xA6, 0xF7, 0x47, 0xFA, 0xAD},    // MAC of node A (example, keep if correct for your setup)
+//   {0x14, 0x33, 0x5C, 0x6D, 0x74, 0x05},    // MAC of node B
+//   {0x14, 0x33, 0x5C, 0x6C, 0x3A, 0x99}     // MAC of node C
+// };
+// const int numTrusted = sizeof(trustedMACs) / sizeof(trustedMACs[0]); // Removed
 
 const int WIFI_CHANNEL = 1;
 
@@ -105,6 +105,10 @@ unsigned long lastLocalDisplayLogManage = 0;
 // Constant for last seen peers management interval
 const unsigned long LAST_SEEN_PEERS_MANAGE_INTERVAL_MS = 60000; // 60 seconds
 unsigned long lastSeenPeersManage = 0;
+
+// Discovery message interval
+const unsigned long PEER_DISCOVERY_INTERVAL_MS = 15000; // Send discovery every 15 seconds
+unsigned long lastDiscoveryBroadcast = 0;
 
 
 int counter = 1; // Still used for the initial auto message
@@ -182,10 +186,15 @@ portMUX_TYPE localDisplayLogMutex = portMUX_INITIALIZER_UNLOCKED; // Corrected i
 const size_t MAX_LOCAL_DISPLAY_LOG_SIZE = 50; // Max number of messages to keep in local display log
 const size_t NUM_ORGANIZER_MESSAGES_TO_RETAIN = 5; // Number of most recent organizer messages to always keep
 
-// Map to store MACs of all peers from which messages have been received
+// Map to store MACs of all peers from which messages have been received (for display and peer management)
 std::map<String, unsigned long> lastSeenPeers;
 portMUX_TYPE lastSeenPeersMutex = portMUX_INITIALIZER_UNLOCKED;
 const unsigned long PEER_LAST_SEEN_DURATION_MS = 600000; // 10 minutes for peer cleanup
+
+// New map for peers added to ESP-NOW for sending (dynamic list)
+std::map<String, unsigned long> espNowAddedPeers;
+portMUX_TYPE espNowAddedPeersMutex = portMUX_INITIALIZER_UNLOCKED;
+const unsigned long ESP_NOW_PEER_TIMEOUT_MS = 300000; // 5 minutes for ESP-NOW peer cleanup
 
 
 enum DisplayMode {
@@ -277,7 +286,6 @@ void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_mes
   for (auto& msg : seenMessages) {
     if (msg.messageID == id && memcmp(msg.originalSenderMac, mac, 6) == 0) {
       msg.timestamp = currentTime;
-      // IMPORTANT: We do NOT update msg.messageData here.
       // The messageData (including its TTL) should remain as it was when first added to the cache,
       // which will be MAX_TTL_HOPS. This ensures re-broadcasts use full TTL potential.
       updated = true;
@@ -330,19 +338,41 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
       return;
   }
 
-  // NEW: Update lastSeenPeers with the MAC of the immediate sender
+  // Update lastSeenPeers with the MAC of the immediate sender (for display on web/TFT)
   portENTER_CRITICAL(&lastSeenPeersMutex);
   lastSeenPeers[formatMac(recvInfo->src_addr)] = millis();
   portEXIT_CRITICAL(&lastSeenPeersMutex);
+
+  // Add/Update peer in espNowAddedPeers for sending (dynamic peer management)
+  String senderMacStr = formatMac(recvInfo->src_addr);
+  portENTER_CRITICAL(&espNowAddedPeersMutex);
+  bool peerExistsInMap = espNowAddedPeers.count(senderMacStr) > 0;
+  portEXIT_CRITICAL(&espNowAddedPeersMutex);
+
+  esp_now_peer_info_t peer{};
+  memcpy(peer.peer_addr, recvInfo->src_addr, 6);
+  peer.channel = WIFI_CHANNEL;
+  peer.encrypt = false; // Custom encryption
+
+  esp_err_t addPeerResult = esp_now_add_peer(&peer);
+  if (addPeerResult == ESP_OK || addPeerResult == ESP_ERR_ESPNOW_EXIST) {
+    portENTER_CRITICAL(&espNowAddedPeersMutex);
+    espNowAddedPeers[senderMacStr] = millis(); // Update timestamp
+    portEXIT_CRITICAL(&espNowAddedPeersMutex);
+  } else {
+    Serial.printf("Failed to add peer %s: %d\n", senderMacStr.c_str(), addPeerResult);
+  }
+
+  // Handle MSG_TYPE_DISCOVERY differently: Do not display, cache, or re-broadcast
+  if (incomingMessage.messageType == MSG_TYPE_DISCOVERY) {
+      return; // Stop processing this message further (silently handled)
+  }
 
   // Check if the message has been seen before by THIS node (for display deduplication).
   bool wasAlreadySeen = isMessageSeen(incomingMessage.messageID, incomingMessage.originalSenderMac);
 
   // Always update the seen message cache first. This ensures the message's timestamp
   // is refreshed and its "full TTL potential" version is stored if new.
-  // Note: The message stored in cache will be the *encrypted* version with MAX_TTL_HOPS,
-  // as addOrUpdateMessageToSeen copies the provided msgData and resets its TTL.
-  // So, we need to pass the *encrypted* version to the cache.
   // To do this, we re-encrypt the incomingMessage before passing it to the cache.
   esp_now_message_t encryptedForCache = incomingMessage; // Create a copy
   prngStreamCipher((uint8_t*)encryptedForCache.content, MAX_MESSAGE_CONTENT_LEN, PRE_SHARED_KEY, PRE_SHARED_KEY_LEN); // Re-encrypt for cache
@@ -352,7 +382,7 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
   // ONLY queue the message for local processing/display if it's truly new to this node.
   // If `wasAlreadySeen` is true, it means this node has already processed it for display
   // or originated it. The re-broadcast logic is handled separately by the cache.
-  if (!wasAlreadySeen) { // Simplified condition to prevent duplication on other nodes
+  if (!wasAlreadySeen) {
       totalMessagesReceived++;
       if (String(incomingMessage.content).indexOf("Urgent: ") != -1) {
           totalUrgentMessages++;
@@ -364,8 +394,7 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
       localDisplayLog.push_back(newEntry);
       portEXIT_CRITICAL(&localDisplayLogMutex);
 
-      // Queue the *encrypted* message for further re-broadcasting by the main loop
-      // We need to re-encrypt it here because incomingMessage was decrypted for local use.
+      // Queue the encrypted message for further re-broadcasting by the main loop
       // The message that goes into the queue for re-broadcasting must be encrypted.
       esp_now_message_t encryptedForQueue = incomingMessage;
       prngStreamCipher((uint8_t*)encryptedForQueue.content, MAX_MESSAGE_CONTENT_LEN, PRE_SHARED_KEY, PRE_SHARED_KEY_LEN);
@@ -392,15 +421,21 @@ void sendToAllPeers(esp_now_message_t& message) { // Changed to pass by referenc
       return;
   }
 
-  for (int i = 0; i < numTrusted; i++) {
-    // Only send to peers that are NOT the original sender of this message
-    // The previous condition `&& memcmp(trustedMACs[i], currentMacBytes, 6) != 0` was removed
-    // as trustedMACs[i] should never be currentMacBytes (our own MAC) if peers are set up correctly.
-    if (memcmp(trustedMACs[i], message.originalSenderMac, 6) != 0) {
+  portENTER_CRITICAL(&espNowAddedPeersMutex);
+  for (auto const& [macStr, timestamp] : espNowAddedPeers) {
+    uint8_t peerMacBytes[6];
+    unsigned int tempMac[6];
+    sscanf(macStr.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X",
+           &tempMac[0], &tempMac[1], &tempMac[2], &tempMac[3], &tempMac[4], &tempMac[5]);
+    for (int k = 0; k < 6; ++k) { peerMacBytes[k] = (uint8_t)tempMac[k]; }
+
+    // Only send to peers that are NOT our own MAC and NOT the original sender of this message
+    if (memcmp(peerMacBytes, currentMacBytes, 6) != 0 && memcmp(peerMacBytes, message.originalSenderMac, 6) != 0) {
       // The message content is already encrypted when it reaches here.
-      esp_now_send(trustedMACs[i], (uint8_t*)&message, sizeof(esp_now_message_t));
+      esp_now_send(peerMacBytes, (uint8_t*)&message, sizeof(esp_now_message_t));
     }
   }
+  portEXIT_CRITICAL(&espNowAddedPeersMutex);
 }
 
 // Helper function to create and send an ESP-NOW message (plaintext)
@@ -424,14 +459,19 @@ void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len,
   sendToAllPeers(newMessage);
   totalMessagesSent++;
 
+  // Special handling for discovery messages: DO NOT add to cache or local display log
+  if (type == MSG_TYPE_DISCOVERY) {
+      return; // Do not proceed further for discovery messages
+  }
+
   // Add to seen messages (newMessage now has its decremented TTL)
-  // Note: addOrUpdateMessageToSeen will store the message with MAX_TTL_HOPS
+  // addOrUpdateMessageToSeen will store the message with MAX_TTL_HOPS
   // when it's first seen, regardless of its incoming TTL.
   addOrUpdateMessageToSeen(newMessage.messageID, newMessage.originalSenderMac, newMessage);
 
   // Add to local display log IMMEDIATELY for originating node
   portENTER_CRITICAL(&localDisplayLogMutex);
-  // Decrypt for local display immediately after sending (so it appears as plaintext on sender's display)
+  // Decrypt for local display immediately after sending
   // Create a copy to decrypt for local display without altering the 'newMessage' that was sent.
   esp_now_message_t displayMessage = newMessage;
   prngStreamCipher((uint8_t*)displayMessage.content, MAX_MESSAGE_CONTENT_LEN, PRE_SHARED_KEY, PRE_SHARED_KEY_LEN); // Decrypt for display
@@ -481,9 +521,6 @@ void manageLocalDisplayLog() {
         }
     }
 
-    // The newLocalDisplayLog is already built in newest-first order due to the initial sort
-    // and subsequent iteration. No need for a final sort here.
-
     localDisplayLog = newLocalDisplayLog;
     portEXIT_CRITICAL(&localDisplayLogMutex);
 }
@@ -502,7 +539,7 @@ void setup() {
   }
 
   // Calculate the hash of the WEB_PASSWORD at startup using the simple hash
-  hashedOrganizerPassword = simpleHash(WEB_PASSWORD); // Changed to simpleHash
+  hashedOrganizerPassword = simpleHash(WEB_PASSWORD);
 
   WiFi.mode(WIFI_AP_STA);
   WiFi.setSleep(false);
@@ -549,14 +586,17 @@ void setup() {
     while(true) { delay(100); }
   }
 
-  for (int i = 0; i < numTrusted; i++) {
-    esp_now_del_peer(trustedMACs[i]);
-    esp_now_peer_info_t peer{};
-    memcpy(peer.peer_addr, trustedMACs[i], 6);
-    peer.channel = WIFI_CHANNEL;
-    peer.encrypt = false; // Explicitly set to false as we're using custom encryption
-    esp_now_add_peer(&peer);
-  }
+  // Add the broadcast MAC address as an initial peer for discovery messages
+  uint8_t broadcastMac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  esp_now_peer_info_t peer{};
+  memcpy(peer.peer_addr, broadcastMac, 6);
+  peer.channel = WIFI_CHANNEL;
+  peer.encrypt = false; // Explicitly set to false as we're using custom encryption
+  esp_now_add_peer(&peer);
+  
+  portENTER_CRITICAL(&espNowAddedPeersMutex);
+  espNowAddedPeers[formatMac(broadcastMac)] = millis(); // Add broadcast MAC to our dynamic peer list
+  portEXIT_CRITICAL(&espNowAddedPeersMutex);
 
   esp_now_register_recv_cb(onDataRecv);
 
@@ -564,6 +604,10 @@ void setup() {
   char msgContentBuf[MAX_MESSAGE_CONTENT_LEN];
   snprintf(msgContentBuf, sizeof(msgContentBuf), "Node %s initializing", MAC_suffix_str.c_str());
   createAndSendMessage(msgContentBuf, strlen(msgContentBuf), MSG_TYPE_AUTO_INIT);
+
+  // Initial discovery broadcast
+  createAndSendMessage(MAC_full_str.c_str(), MAC_full_str.length(), MSG_TYPE_DISCOVERY);
+  lastDiscoveryBroadcast = millis();
 
   lastRebroadcast = millis();
   lastLocalDisplayLogManage = millis(); // Initialize the timer for display log management
@@ -606,7 +650,6 @@ void loop() {
         esp_now_message_t encryptedForRebroadcast = receivedMessage; // Create a copy
         prngStreamCipher((uint8_t*)encryptedForRebroadcast.content, MAX_MESSAGE_CONTENT_LEN, PRE_SHARED_KEY, PRE_SHARED_KEY_LEN); // Encrypt for re-broadcast
         sendToAllPeers(encryptedForRebroadcast);
-        // No need to addOrUpdateMessageToSeen here, as it was already added when received.
     } else {
         Serial.println("Message reached TTL limit, not re-broadcasting.");
     }
@@ -630,10 +673,15 @@ void loop() {
       // sendToAllPeers will decrement msg's TTL.
       // This 'msg' here is a copy from the cache, which had its TTL reset to MAX_TTL_HOPS.
       sendToAllPeers(msg);
-      // We don't need to addOrUpdateMessageToSeen here for the decremented TTL,
-      // as the cache's purpose is to hold the message with its full re-broadcast potential.
-      // The message is already in the cache with MAX_TTL_HOPS.
     }
+  }
+
+  // Periodic discovery broadcast
+  if (millis() - lastDiscoveryBroadcast >= PEER_DISCOVERY_INTERVAL_MS) {
+      lastDiscoveryBroadcast = millis();
+      // Send a discovery message. The content doesn't matter much, as it's silently handled.
+      // Using our own MAC as content for identification if needed for debugging.
+      createAndSendMessage(MAC_full_str.c_str(), MAC_full_str.length(), MSG_TYPE_DISCOVERY);
   }
 
   // Periodically manage the local display log
@@ -642,11 +690,13 @@ void loop() {
       manageLocalDisplayLog();
   }
 
-  // Periodically manage the lastSeenPeers map
+  // Periodically manage the lastSeenPeers map and espNowAddedPeers
   if (millis() - lastSeenPeersManage >= LAST_SEEN_PEERS_MANAGE_INTERVAL_MS) {
       lastSeenPeersManage = millis();
-      portENTER_CRITICAL(&lastSeenPeersMutex);
       unsigned long currentTime = millis();
+
+      // Cleanup lastSeenPeers (for display)
+      portENTER_CRITICAL(&lastSeenPeersMutex);
       for (auto it = lastSeenPeers.begin(); it != lastSeenPeers.end(); ) {
           if ((currentTime - it->second) > PEER_LAST_SEEN_DURATION_MS) {
               it = lastSeenPeers.erase(it);
@@ -655,6 +705,28 @@ void loop() {
           }
       }
       portEXIT_CRITICAL(&lastSeenPeersMutex);
+
+      // Cleanup espNowAddedPeers (for sending)
+      portENTER_CRITICAL(&espNowAddedPeersMutex);
+      for (auto it = espNowAddedPeers.begin(); it != espNowAddedPeers.end(); ) {
+          // Do not remove the broadcast MAC address
+          if (it->first == "FF:FF:FF:FF:FF:FF") {
+              ++it;
+              continue;
+          }
+          if ((currentTime - it->second) > ESP_NOW_PEER_TIMEOUT_MS) {
+              uint8_t peerMacBytes[6];
+              unsigned int tempMac[6];
+              sscanf(it->first.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X",
+                     &tempMac[0], &tempMac[1], &tempMac[2], &tempMac[3], &tempMac[4], &tempMac[5]);
+              for (int k = 0; k < 6; ++k) { peerMacBytes[k] = (uint8_t)tempMac[k]; }
+              esp_now_del_peer(peerMacBytes); // Remove from ESP-NOW internal peer list
+              it = espNowAddedPeers.erase(it); // Remove from our map
+          } else {
+              ++it;
+          }
+      }
+      portEXIT_CRITICAL(&espNowAddedPeersMutex);
   }
 
 
@@ -864,7 +936,7 @@ void loop() {
                           challengeNonceTimestamp = 0;
                       } else {
                           // Use the simpleHash function
-                          String expectedResponse = simpleHash(String(WEB_PASSWORD) + challengeNonceReceived); // Changed to simpleHash
+                          String expectedResponse = simpleHash(String(WEB_PASSWORD) + challengeNonceReceived);
 
                           if (expectedResponse.equalsIgnoreCase(passwordResponseHash)) { // Compare with client-provided hash
                               loginAttempts = 0;
@@ -966,7 +1038,7 @@ void loop() {
                       if (decodedNewPassword.length() == 0) {
                           webFeedbackMessage = "<p class='feedback' style='color:orange;'>New password cannot be empty.</p>";
                       } else {
-                          hashedOrganizerPassword = simpleHash(decodedNewPassword); // Changed to simpleHash
+                          hashedOrganizerPassword = simpleHash(decodedNewPassword);
                           webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer password updated successfully!</p>";
                           loginAttempts = 0; // Reset login attempts on successful password change
                           lockoutTime = 0;
@@ -991,7 +1063,7 @@ void loop() {
             // --- HTML Generation for Web Interface ---
             String detectedNodesHtmlContent = "<div class='recent-senders-display-wrapper'><span class='detected-nodes-label'>Senders:</span><div class='detected-nodes-mac-list'>";
             int count = 0;
-            portENTER_CRITICAL(&lastSeenPeersMutex); // Use the new lastSeenPeers for display
+            portENTER_CRITICAL(&lastSeenPeersMutex); // Use the lastSeenPeers for display
             std::vector<std::pair<String, unsigned long>> sortedSeenPeers;
             for (auto const& [macStr, timestamp] : lastSeenPeers) { sortedSeenPeers.push_back({macStr, timestamp}); }
             std::sort(sortedSeenPeers.begin(), sortedSeenPeers.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
@@ -1339,7 +1411,7 @@ void displayDeviceInfoMode() {
   tft.setTextColor(TFT_WHITE);     tft.println("----------------------");
   tft.println("Nearby Nodes (Last Seen):");
 
-  portENTER_CRITICAL(&lastSeenPeersMutex); // Use the new lastSeenPeers for display
+  portENTER_CRITICAL(&lastSeenPeersMutex); // Use the lastSeenPeers for display
   std::vector<std::pair<String, unsigned long>> sortedSeenPeers;
   for (auto const& [macStr, timestamp] : lastSeenPeers) { sortedSeenPeers.push_back({macStr, timestamp}); }
   std::sort(sortedSeenPeers.begin(), sortedSeenPeers.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
