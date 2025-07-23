@@ -1,254 +1,151 @@
-ESP32 Mesh Information Node
-This project transforms an ESP32 microcontroller into a self-contained, offline mesh communication node. It creates its own Wi-Fi Access Point (SoftAP) to allow users to connect via a web browser and exchange messages that are then propagated across a network of other trusted ESP32 nodes using ESP-NOW. This is designed for scenarios where traditional internet or cellular networks are unavailable, providing a resilient local communication channel.
+Protest Information Node
+This project implements a decentralized, local communication network designed for sharing information in environments where traditional internet or cellular services might be unavailable or unreliable. Each device acts as a node in a self-organizing mesh, enabling communication without a central server.
 
-Messages are deduplicated and periodically re-broadcast within the mesh to ensure maximum propagation and reliability, even if nodes temporarily go offline and reconnect. It includes optional support for a TFT display to show recent messages and node status.
+What It Does (For Everyone)
+The Protest Information Node provides a robust way for people to share messages locally:
 
-Features
-Offline Mesh Communication (ESP-NOW): Utilizes ESP-NOW for fast, connectionless message exchange between ESP32 boards, forming a local mesh network without a router.
+Offline Communication: It works completely without internet access, creating its own local network.
 
-Web Interface (SoftAP): Each node acts as a Wi-Fi Access Point (ProtestInfo_XXXX where XXXX is part of its MAC address), hosting a simple web page for users to view incoming messages and send new ones.
+Public Messages: Anyone connected to a node's Wi-Fi can view messages. Public message sending is off by default and must be enabled by an organizer.
 
-DNS Server: A built-in DNS server on the SoftAP redirects all DNS requests to the node's IP, ensuring the web interface loads consistently (e.g., you can type any domain into your browser, and it will resolve to the node's web page).
+Organizer Messages: Authorized organizers can send important, prioritized messages, including "Urgent" alerts, and manage the network's settings.
 
-Message Deduplication: Prevents redundant processing and re-broadcasting of messages already seen, improving network efficiency.
+Message Sharing: Messages automatically spread from node to node, extending the reach of communication across the local area.
 
-Periodic Re-broadcasting: Automatically re-sends older, unique messages from its cache at random intervals. This ensures that messages propagate throughout the network, even if some nodes were temporarily offline when the message was originally sent.
+Local Display: If a screen is attached, it can show messages directly, including urgent ones, and basic device information.
 
-Time-To-Live (TTL): Messages have a configurable hop limit to prevent infinite loops and manage network congestion.
+Flashing with Arduino IDE (For Setup)
+To upload the code to your ESP32 board using the Arduino IDE:
 
-Trusted Peers System: Only communicates with other ESP32 nodes whose MAC addresses are explicitly listed in its firmware, enhancing security in a closed network.
+Install Arduino IDE: Download and install the Arduino IDE from the official website.
 
-Configurable Password: The web interface for sending messages is protected by a simple password.
+Add ESP32 Board Support:
 
-TFT Display Support (Optional): Can display incoming messages and node status on a connected TFT screen (requires TFT_eSPI library).
+Go to File > Preferences.
 
-Hardware Requirements
-ESP32 Development Board: Any ESP32 board (e.g., ESP32-DevKitC, ESP32 WROOM-32, NodeMCU-32S).
+In "Additional Boards Manager URLs," add: https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
 
-Micro-USB Cable: To connect the ESP32 to your computer for flashing.
+Go to Tools > Board > Boards Manager...
 
-Computer: Running Windows, macOS, or Linux.
+Search for "esp32" and install the "esp32 by Espressif Systems" package.
 
-TFT Display (Optional): If USE_DISPLAY is set to true in the code, a compatible TFT display (e.g., using an ILI9341 or ST7789 driver) connected via SPI.
+Install Libraries:
 
-Software Requirements
-Arduino IDE: Download and install from https://www.arduino.cc/en/software.
+Go to Sketch > Include Library > Manage Libraries...
 
-ESP32 Boards Manager URL: Add the following URL in Arduino IDE File > Preferences > Additional Boards Manager URLs:
+Search for and install TFT_eSPI (if USE_DISPLAY is true in the code).
 
-https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+Open Project: Open the .ino file (this code) in Arduino IDE.
 
-ESP32 Board Definitions: Install "esp32 by Espressif Systems" via Tools > Board > Boards Manager... in Arduino IDE.
+Select Board: Go to Tools > Board > ESP32 Arduino and select your specific ESP32 board (e.g., "ESP32 Dev Module").
 
-TFT_eSPI Library: Install "TFT_eSPI by Bodmer" via Sketch > Include Library > Manage Libraries... in Arduino IDE if you are using a display.
+Select Port: Go to Tools > Port and select the serial port connected to your ESP32.
 
-Setup Instructions
-Follow these steps to prepare your ESP32 boards:
+Upload: Click the "Upload" button (right arrow icon) to compile and flash the code to your ESP32.
 
-1. Install Arduino IDE and ESP32 Board Support
-Refer to the "Software Requirements" section above and ensure the Arduino IDE is installed and the ESP32 board definitions are successfully added via the Boards Manager.
+Once flashed, the ESP32 will reboot and start its local Wi-Fi network and communication services.
 
-2. Install Required Libraries
-TFT_eSPI: If you plan to use a TFT display (#define USE_DISPLAY true), open Arduino IDE, go to Sketch > Include Library > Manage Libraries..., search for TFT_eSPI, and install it.
+How to Use (Quick Start)
+After flashing and powering on a node, follow these steps to interact with it:
 
-DNSServer.h, WiFi.h, esp_now.h, esp_wifi.h, vector, algorithm, string.h, set, map: These are typically included with the ESP32 board package and do not require separate installation.
+Connect to Wi-Fi: On your phone or computer, search for Wi-Fi networks. You will see a network named ProtestInfo_XXXX (where XXXX are the last four characters of the node's unique hardware address). Connect to this network. No password is required for the Wi-Fi itself.
 
-3. Obtain Your ESP32 MAC Addresses
-This is a CRITICAL step. Each ESP32 node in your mesh must have the MAC addresses of all other trusted nodes hard-coded.
+Access the Web Interface: Once connected, your device should automatically open a "captive portal" page. If not, open a web browser and try to navigate to any website (e.g., http://example.com). You will be redirected to the node's local web interface.
 
-For each ESP32 board you intend to use:
+View Messages: The main page displays a log of all messages received by this node. You can use the filter buttons ("Show Public Messages" / "Hide Public Messages" and "Show Urgent Only" / "Show All Messages") to customize your view.
 
-Open a new sketch in the Arduino IDE.
+Organizer Mode (Core Function):
 
-Paste the following code:
+To access the core functions of the node, find the "Enter Organizer Mode" section.
 
-#include <WiFi.h>
-void setup() {
-  Serial.begin(115200);
-  Serial.print("ESP32 MAC Address: ");
-  Serial.println(WiFi.macAddress());
-}
-void loop() {}
+Initial Setup: If this is a new node, you'll first be prompted to "Set Initial Organizer Password." Choose a strong password and confirm it. This password will then spread to all other connected nodes in the mesh. You only need to set the organizer password once across your network. Once set, this password cannot be changed through the web interface without physically rebooting the board for security reasons. This locking mechanism prevents unauthorized changes to the node's core settings after deployment.
 
-Select your ESP32 board (Tools > Board) and the correct serial port (Tools > Port).
+Logging In: After the password is set, you'll use this section to log in as an organizer.
 
-Upload this small sketch to the ESP32.
+Organizer Actions: Once logged in, you can send prioritized organizer messages, manually re-broadcast messages, and control the "Public Messaging Lock."
 
-Open the Serial Monitor (Tools > Serial Monitor) and set the baud rate to 115200.
+Send Public Messages (Requires Organizer Enablement):
 
-Note down the full MAC address displayed (e.g., 14:33:5C:06:3A:99).
+Look for the "Send a Public Message" section.
 
-Repeat this for every ESP32 you plan to include in your mesh.
+Public messaging is off by default. An organizer must enable it through "Organizer Mode" for this feature to become active. Once enabled, you can type your message and send it. These messages are shared with all connected nodes.
 
-4. Configure trustedMACs in the Main Code
-Copy the provided main sketch code (the content of code_canvas) into a new Arduino IDE sketch.
+Understanding the Locking Mechanisms
+The system includes two important locking mechanisms designed for security and control:
 
-Find the section:
+Organizer Password Lock: The organizer password for a node is set at runtime. Once a non-default password is set (either locally or received from another node), it becomes permanently locked for that session. This means the password cannot be changed through the web interface without physically rebooting the ESP32 board. Upon reboot, the organizer password for that specific board will reset to its default value ('password'). To truly reset the organizer password across an entire mesh (i.e., change it from a previously set non-default value to a new non-default value), all boards in the mesh must be powered off before setting the new password on a single board and then powering others back on. This ensures that the new password propagates without interference from other nodes still holding the old password. This mechanism ensures that once a node is deployed with a specific organizer password, it maintains that security setting, preventing unauthorized password changes over the air.
 
-const uint8_t trustedMACs[][6] = {
-  {0x08, 0xA6, 0xF7, 0x47, 0xFA, 0xAD},    // MAC of node A
-  {0x14, 0x33, 0x5C, 0x6D, 0x74, 0x05},    // MAC of node B
-  {0x14, 0x33, 0x5C, 0x6C, 0x3A, 0x99}     // MAC of node C
-  // Add all other ESP32 MAC addresses here, ensuring they are exact!
-};
+Public Messaging Lock: An organizer has the ability to "Disable Public Msgs," which also "locks" public messaging off. This means that once public messaging is locked off by an organizer, it cannot be re-enabled through the web interface until the board is rebooted. This provides a critical control mechanism for organizers to shut down public communication if necessary, preventing its re-activation without physical intervention.
 
-Replace the example MAC addresses with the actual MAC addresses you collected in the previous step.
+Technical Details for Development
+This section provides a deeper dive into the technical implementation for developers and those interested in the underlying mechanisms.
 
-Convert each colon-separated hexadecimal pair to 0x format.
+ESP-NOW Mesh Network:
 
-Example: 14:33:5C:06:3A:99 becomes {0x14, 0x33, 0x5C, 0x06, 0x3A, 0x99}.
+Each node establishes a peer-to-peer connection with other nearby nodes using ESP-NOW, a connectionless communication protocol.
 
-Ensure numTrusted (calculated automatically) correctly reflects the number of MAC addresses you've entered.
+There is no central server; messages are relayed between nodes in a mesh-like fashion.
 
-Crucially, this trustedMACs array MUST BE IDENTICAL on ALL ESP32 boards in your mesh. If a node's MAC is not in another node's trustedMACs list, they will not communicate.
+Nodes dynamically discover each other and add new peers to their network.
 
-5. Flash the Code
-Connect your ESP32 board to your computer.
+Message Types & Prioritization:
 
-In Arduino IDE, select your ESP32 board (Tools > Board) and the correct serial port (Tools > Port).
+Organizer Messages (MSG_TYPE_ORGANIZER): Sent by authenticated organizers, can be marked as "Urgent."
 
-Click the Upload button (right arrow icon) in the Arduino IDE toolbar.
+Public Messages (MSG_TYPE_PUBLIC): Sent by any connected user when public messaging is enabled.
 
-If the upload fails, you might need to manually put your ESP32 into "flashing mode":
+Auto-Init Messages (MSG_TYPE_AUTO_INIT): Sent by a node upon startup.
 
-Hold down the BOOT (or FLASH) button on your ESP32.
+Command Messages (MSG_TYPE_COMMAND): Used by organizers to control network-wide settings (e.g., enabling/disabling public messaging).
 
-While holding BOOT, press the EN (or RESET) button once, then release EN.
+Discovery Messages (MSG_TYPE_DISCOVERY): Used for peer discovery and network topology maintenance.
 
-Continue holding BOOT.
+Password Update Messages (MSG_TYPE_PASSWORD_UPDATE): Broadcast to update organizer passwords across the mesh.
 
-Click the Upload button in the Arduino IDE again.
+Status Request/Response Messages (MSG_TYPE_STATUS_REQUEST, MSG_TYPE_STATUS_RESPONSE): Used for nodes to query and share their public messaging status.
 
-Once you see "Connecting..." and upload progress, you can release the BOOT button.
+Encryption:
 
-Repeat this entire flashing process for each ESP32 board you want to be part of your mesh, ensuring they all have the identical and correct trustedMACs list.
+All message content is encrypted using a simple XOR stream cipher with a pre-shared key (PSK) known to all nodes. This provides a basic layer of confidentiality.
 
-Usage
-Once flashed, each ESP32 node will operate as follows:
+Message Deduplication and Re-broadcasting:
 
-Connect to the Wi-Fi: On your phone or computer, look for a Wi-Fi network named ProtestInfo_XXXX (where XXXX is a unique identifier from the node's MAC address). Connect to this network. No password is required for the Wi-Fi itself.
+Each message is assigned a unique ID and original sender MAC.
 
-Access the Web Interface: Open a web browser. Any URL you type (e.g., http://example.com, http://google.com, or directly http://192.168.4.1) should redirect you to the node's web interface.
+Nodes maintain a cache of recently seen messages to prevent redundant processing and re-broadcasting.
 
-View Messages: The main page will display a log of all messages received by this node, with the most recent at the top.
+Messages have a Time-To-Live (TTL) counter, which decrements with each hop. Messages are re-broadcast until their TTL reaches zero, ensuring propagation across the mesh.
 
-Send Messages: Below the message log, there's a collapsible "Send Message" section.
+Web Interface (SoftAP):
 
-Enter your message in the text field.
+Each node creates its own Wi-Fi Access Point (SoftAP) with a unique SSID (e.g., "ProtestInfo_EEFF").
 
-Enter the WEB_PASSWORD (default: password).
+Users connect to this Wi-Fi network. A captive portal redirects all web requests to the node's local web interface.
 
-Click "Send Message".
+Public Page: Displays the message log. Public message sending is available if enabled by an organizer.
 
-Your message will be sent via ESP-NOW to all other trusted nodes in the mesh.
+Organizer Page: Accessible via password-based challenge-response authentication. Organizers can:
 
-Configuration
-You can customize the node's behavior by modifying these #define and const values at the top of the .ino file:
+Send organizer messages (including "Urgent" messages).
 
-#define USE_DISPLAY true/false:
+Toggle public messaging on/off.
 
-Set to true if you have a TFT display connected and want messages to appear on it.
+Set an initial organizer password for the node. Once set, the password cannot be changed without rebooting the board.
 
-Set to false to disable display functionality and save resources if you don't have one.
+Re-broadcast the message cache.
 
-const char* WEB_PASSWORD = "password";:
+Public Messaging Lock: An organizer can permanently disable public messaging (until the board is rebooted) via a command.
 
-Highly Recommended: Change "password" to a strong, unique password for your web interface. This prevents unauthorized users from sending messages.
+Local Display (TFT):
 
-const uint8_t trustedMACs[][6]:
+If a TFT display is connected, the node can cycle through different display modes:
 
-Essential: As described in Setup Step 4, this array MUST contain the MAC addresses of all ESP32 nodes you want to be part of your mesh. Each node must have the same complete list.
+All messages (chat log).
 
-const int WIFI_CHANNEL = 1;:
+Urgent messages only.
 
-Defines the Wi-Fi channel for both the SoftAP and ESP-NOW communication. All nodes in your mesh should ideally be on the same channel for optimal performance.
+Device information (MAC, IP, nearby nodes).
 
-#define MAX_MESSAGE_CONTENT_LEN 239:
+Network statistics (messages sent/received, cache size, uptime).
 
-The maximum length (in bytes) of the message content. Adjust with caution, as ESP-NOW packets have a maximum payload of 250 bytes.
-
-#define MAX_TTL_HOPS 40:
-
-The maximum number of "hops" (re-broadcasts) a message can make before it's discarded. Increased for potentially larger mesh networks.
-
-const unsigned long DEDUP_CACHE_DURATION_MS = 600000; (10 minutes):
-
-How long a message stays in the cache to prevent it from being processed or re-broadcasted as a duplicate.
-
-const size_t MAX_CACHE_SIZE = 50;:
-
-The maximum number of unique messages to store in the cache to prevent memory exhaustion.
-
-const unsigned long REBROADCAST_CENTER_MS = 240000; (4 minutes):
-
-The central interval for periodic re-broadcasting of cached messages.
-
-const unsigned long REBROADCAST_RANDOM_RANGE_MS = 60000; (+/- 1 minute):
-
-A random range added to REBROADCAST_CENTER_MS to randomize re-broadcast times, helping to avoid "broadcast storms."
-
-const unsigned long REBROADCAST_MIN_AGE_MS = 60000; (1 minute):
-
-Minimum age a message must be in the cache before it is eligible for periodic re-broadcasting.
-
-How it Works (Brief Technical Overview)
-Initialization (setup()):
-
-The ESP32 is configured in WIFI_AP_STA mode, acting as both an Access Point and a Wi-Fi station.
-
-A SoftAP is created with a unique SSID (ProtestInfo_XXXX) and a static IP address (192.168.4.1).
-
-A DNS server is started to redirect all DNS requests to the SoftAP's IP, simplifying web access.
-
-ESP-NOW is initialized, and all trustedMACs are added as peers for sending and receiving.
-
-A FreeRTOS queue (messageQueue) is created to safely pass incoming ESP-NOW messages from the interrupt service routine (onDataRecv) to the main loop() for processing.
-
-The Wi-Fi channel is explicitly set for both SoftAP and ESP-NOW to ensure consistency.
-
-Receiving Messages (onDataRecv ISR):
-
-When an ESP-NOW packet arrives, the onDataRecv callback is triggered.
-
-It immediately checks if the message (based on messageID and originalSenderMac) has already been seen using a critical section and a seenMessages cache.
-
-If new and valid (TTL > 0), the message is added to the seenMessages cache and pushed onto the messageQueue for further processing in the main loop.
-
-Processing & Re-broadcasting (loop()):
-
-The loop() continuously checks the messageQueue for new incoming messages.
-
-For each new message, it's prepended to the serialBuffer (for web display) and, if its ttl is still greater than 0, it's re-broadcasted to all other trusted peers using sendToAllPeers().
-
-The sendToAllPeers() function decrements the ttl before sending and avoids sending back to the original sender or itself.
-
-Periodic Re-broadcasting: At random intervals, the loop() iterates through the seenMessages cache. Any messages that are "old enough" (older than REBROADCAST_MIN_AGE_MS) and still have ttl > 0 are re-broadcasted. This helps messages reach all parts of the mesh over time.
-
-Web Server: The loop() also handles incoming HTTP requests. GET requests serve the main web page, while POST requests process user-submitted messages (after password validation) and queue them for ESP-NOW transmission. A POST/Redirect/GET (PRG) pattern is used to prevent duplicate form submissions.
-
-Auto Messages: An automated message is sent periodically to keep the network active if no user messages are sent.
-
-Deduplication Cache (seenMessages):
-
-The seenMessages vector acts as a cache, storing messageID, originalSenderMac, and timestamp of recently seen messages.
-
-When adding new messages, the cache removes the oldest entries if it exceeds MAX_CACHE_SIZE or if entries are older than DEDUP_CACHE_DURATION_MS. This manages memory usage and ensures that messages are eventually forgotten, allowing them to be processed again if they persist in the network after a very long time.
-
-Known Issues and Limitations
-Security: This project uses hard-coded MAC addresses for trusted peers and a simple password for the web interface. This is suitable for closed, non-hostile environments. For truly secure applications, consider adding encryption to ESP-NOW and more robust authentication for the web server.
-
-Range: ESP-NOW range depends on environmental factors, antenna quality, and ESP32 power output. Obstacles will reduce range.
-
-Scalability: While ESP-NOW is efficient, very large meshes with many active nodes and high message rates might eventually encounter performance issues due to broadcast storms or cache management on resource-constrained ESP32s. The MAX_CACHE_SIZE, REBROADCAST_CENTER_MS, and MAX_TTL_HOPS can be adjusted.
-
-No Message Persistence (Power Cycle): Messages are stored in RAM. If a node loses power, its serialBuffer and seenMessages cache will be cleared. Messages must be re-propagated by other active nodes.
-
-Web Server Simplicity: The web server is very basic and does not support concurrent connections well, nor does it serve complex assets. It is designed for minimal resource usage.
-
-TFT Display Specifics: The TFT_eSPI library requires configuration for your specific display in its User_Setup.h file. This is not handled by the sketch itself.
-
-Contributing
-Feel free to fork this repository, open issues, and submit pull requests.
-
-License
-This project is open-source and licensed under the MIT License. See the LICENSE file for more details.
+Display modes can be changed via touch input (if supported by the TFT).
