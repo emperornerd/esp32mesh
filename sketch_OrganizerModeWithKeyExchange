@@ -37,6 +37,7 @@ bool displayActive = false;
 #define MSG_TYPE_COMMAND 3
 #define MSG_TYPE_UNKNOWN 4 // Default for messages without explicit type
 #define MSG_TYPE_DISCOVERY 5 // New message type for peer discovery
+#define MSG_TYPE_PASSWORD_UPDATE 6 // New message type for password updates
 
 // Placing esp_now_message_t definition early to ensure it's recognized by the compiler.
 // This uses the typedef struct syntax as provided in your original working code.
@@ -51,8 +52,10 @@ typedef struct __attribute__((packed)) {
 
 
 // The plaintext password for organizer access. This will be hashed at runtime.
-const char* WEB_PASSWORD = "password";
-// Stores the hash of WEB_PASSWORD, calculated at setup.
+// NOTE: This initial value is used only once at setup to generate the initial hashedOrganizerPassword.
+// The actual password for login will be stored and updated in hashedOrganizerPassword.
+const char* WEB_PASSWORD = "password"; 
+// Stores the hash of WEB_PASSWORD, calculated at setup, and updated on password reset.
 String hashedOrganizerPassword; 
 
 const int WIFI_CHANNEL = 1;
@@ -71,6 +74,7 @@ String organizerSessionToken = "";          // Stores the active organizer sessi
 unsigned long sessionTokenTimestamp = 0;    // Timestamp of when the token was created/last used
 const unsigned long SESSION_TIMEOUT_MS = 900000; // Session timeout: 15 minutes
 bool publicMessagingEnabled = false;
+bool passwordChangeLocked = false; // New flag to lock password changes after mesh update
 
 int loginAttempts = 0;
 unsigned long lockoutTime = 0;
@@ -384,6 +388,20 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
   // Check if the message has been seen before by THIS node (for display deduplication).
   bool wasAlreadySeen = isMessageSeen(incomingMessage.messageID, incomingMessage.originalSenderMac);
 
+  bool skipDisplayLog = false; // Flag to control display logging
+
+  // Handle MSG_TYPE_PASSWORD_UPDATE
+  if (incomingMessage.messageType == MSG_TYPE_PASSWORD_UPDATE) {
+      if (!wasAlreadySeen) { // Only process if new to this node
+          Serial.println("Received password update command via mesh.");
+          // The content is the plaintext new password (decrypted by onDataRecv already)
+          hashedOrganizerPassword = simpleHash(String(incomingMessage.content));
+          passwordChangeLocked = true; // Lock password change on this board
+          Serial.println("Organizer password updated via mesh. Local change locked.");
+      }
+      skipDisplayLog = true; // Always skip display for password updates
+  }
+
   // Always update the seen message cache first. This ensures the message's timestamp
   // is refreshed and its "full TTL potential" version is stored if new.
   // To do this, we re-encrypt the incomingMessage before passing it to the cache.
@@ -401,11 +419,13 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
           totalUrgentMessages++;
       }
 
-      // Add to local display log (decrypted version)
-      portENTER_CRITICAL(&localDisplayLogMutex);
-      LocalDisplayEntry newEntry = {incomingMessage, millis()}; // Store message and its reception timestamp
-      localDisplayLog.push_back(newEntry);
-      portEXIT_CRITICAL(&localDisplayLogMutex);
+      // Add to local display log (decrypted version) - ONLY if not a password update
+      if (!skipDisplayLog) { // Check the flag here
+          portENTER_CRITICAL(&localDisplayLogMutex);
+          LocalDisplayEntry newEntry = {incomingMessage, millis()}; // Store message and its reception timestamp
+          localDisplayLog.push_back(newEntry);
+          portEXIT_CRITICAL(&localDisplayLogMutex);
+      }
 
       // Queue the encrypted message for further re-broadcasting by the main loop
       // The message that goes into the queue for re-broadcasting must be encrypted.
@@ -475,9 +495,9 @@ void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len,
   sendToAllPeers(newMessage);
   totalMessagesSent++;
 
-  // Special handling for discovery messages: DO NOT add to cache or local display log
-  if (type == MSG_TYPE_DISCOVERY) {
-      return; // Do not proceed further for discovery messages
+  // Special handling for discovery messages and password updates: DO NOT add to cache or local display log
+  if (type == MSG_TYPE_DISCOVERY || type == MSG_TYPE_PASSWORD_UPDATE) { // MODIFIED: Added check for MSG_TYPE_PASSWORD_UPDATE
+      return; // Do not proceed further for these message types
   }
 
   // Add to seen messages (newMessage now has its decremented TTL)
@@ -548,6 +568,7 @@ void setup() {
   randomSeed(analogRead(0));
 
   publicMessagingEnabled = false;
+  passwordChangeLocked = false; // Initialize password change lock status
 
   messageQueue = xQueueCreate(QUEUE_SIZE, sizeof(esp_now_message_t));
   if (messageQueue == NULL) {
@@ -972,8 +993,9 @@ void loop() {
                           currentChallengeNonce = "";
                           challengeNonceTimestamp = 0;
                       } else {
-                          // Use the simpleHash function
-                          String expectedResponse = simpleHash(String(WEB_PASSWORD) + challengeNonceReceived);
+                          // Use the simpleHash function with the *current* hashedOrganizerPassword
+                          // The server computes: hash(stored_hashed_password + nonce)
+                          String expectedResponse = simpleHash(hashedOrganizerPassword + challengeNonceReceived);
 
                           if (expectedResponse.equalsIgnoreCase(passwordResponseHash)) { // Compare with client-provided hash
                               loginAttempts = 0;
@@ -1079,10 +1101,23 @@ void loop() {
                       if (decodedNewPassword.length() == 0) {
                           webFeedbackMessage = "<p class='feedback' style='color:orange;'>New password cannot be empty.</p>";
                       } else {
-                          hashedOrganizerPassword = simpleHash(decodedNewPassword);
-                          webFeedbackMessage = "<p class class='feedback' style='color:green;'>Organizer password updated successfully!</p>";
-                          loginAttempts = 0; // Reset login attempts on successful password change
-                          lockoutTime = 0;
+                          // Check if password change is locked
+                          if (passwordChangeLocked) {
+                              webFeedbackMessage = "<p class='feedback' style='color:red;'>Password change is locked. You must reflash the board to change it again.</p>";
+                          } else {
+                              // Update local hashed password
+                              hashedOrganizerPassword = simpleHash(decodedNewPassword);
+                              webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer password updated successfully!</p>";
+                              loginAttempts = 0; // Reset login attempts on successful password change
+                              lockoutTime = 0;
+
+                              // Broadcast the new password (plaintext) to the mesh
+                              // It will be hashed and encrypted by createAndSendMessage
+                              createAndSendMessage(decodedNewPassword.c_str(), decodedNewPassword.length(), MSG_TYPE_PASSWORD_UPDATE);
+                              
+                              // Lock future password changes on this board via mesh
+                              passwordChangeLocked = true;
+                          }
                       }
                   } else {
                       webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Invalid or expired session to change password.</p>";
@@ -1149,12 +1184,11 @@ void loop() {
             client.println(F(".chat-main-content{flex:1;width:100%;max-width:700px;margin:0 auto;background:#fff;padding:15px;border-radius:8px;box-shadow:0 2px 5px rgba(0,0,0,0.1);border:1px solid #ddd;}"));
             client.println(F("pre{background:#eee;padding:10px;border-radius:5px;text-align:left;max-width:100%;overflow-x:auto;white-space:pre-wrap;word-wrap:break-word;font-size:0.85em;border:1px solid #ccc;min-height:200px;}"));
             client.println(F("details, .form-container{background:#fff;padding:15px;border-radius:8px;box-shadow:0 2px 5px rgba(0,0,0,0.1);max-width:450px;margin:15px auto;border:1px solid #ddd;}"));
-            client.println(F("summary{font-size:1.1em;font-weight:bold;cursor:pointer;padding:5px 0;text-align:center;}"));
+            client.println(F("summary{font-size:1.1em;font-weight:bold;cursor:pointer;padding:5px 0;text-align:center; outline: none; border: none;} /* Added outline and border none */"));
             client.println(F("form{display:flex;flex-direction:column;align-items:center;margin-top:10px;}"));
             client.println(F("label{font-size:0.9em;margin-bottom:5px;align-self:flex-start;width:80%;}"));
             client.println(F("input[type=text],input[type=password]{width:80%;max-width:350px;padding:8px;margin-bottom:10px;border-radius:4px;border:1px solid #ccc;font-size:0.9em;}"));
-            client.println(F("input[type=submit], .button-link{background-color:#007bff;color:white!important;padding:8px 15px;border:none;border-radius:4px;cursor:pointer;font-size:1em;transition:background-color 0.3s ease;text-decoration:none;display:inline-block;}"));
-            client.println(F("input[type=submit]:hover, .button-link:hover{background-color:#0056b3;}"));
+            client.println(F("input[type=submit], .button-link{background-color:#007bff;color:white!important;padding:8px 15px;border:none;border-radius:4px;cursor:pointer;font-size:1em;transition:background-color 0.3s ease;text-decoration:none;display:block; margin: 0 auto;}"));
             client.println(F(".button-link.secondary{background-color:#6c757d;} .button-link.secondary:hover{background-color:#5a6268;}"));
             client.println(F(".recent-senders-display-wrapper{display:flex;flex-direction:column;align-items:center;width:100%;max-width:450px;background:#e6f7ff;border:1px solid #cceeff;border-radius:12px;padding:10px 15px;font-size:0.75em;color:#0056b3;margin:15px auto;}"));
             client.println(F(".detected-nodes-label{font-weight:bold;margin-bottom:5px;color:#003366;}"));
@@ -1193,9 +1227,9 @@ void loop() {
             client.println(F("        challengeNonceInput.value = nonce;"));
             client.println(F("        console.log('Received nonce:', nonce);"));
             client.println(F("        const plaintextPassword = passwordInput.value;"));
-            client.println(F("        const combinedString = plaintextPassword + nonce;"));
-            client.println(F("        console.log('Hashing password and nonce with simpleHash...');"));
-            client.println(F("        // Using the embedded simpleHash function"));
+            client.println(F("        // Corrected client-side hashing: hash the plaintext password, then hash with nonce"));
+            client.println(F("        const hashedClientPassword = simpleHash(plaintextPassword);"));
+            client.println(F("        const combinedString = hashedClientPassword + nonce;"));
             client.println(F("        const responseHash = simpleHash(combinedString);"));
             client.println(F("        passwordResponseHashInput.value = responseHash;"));
             client.println(F("        console.log('Generated hash:', responseHash);"));
@@ -1290,6 +1324,15 @@ void loop() {
                 client.print(F("<input type='submit' value='"));
                 client.print(publicMessagingEnabled ? "Disable Public Msgs" : "Enable Public Msgs");
                 client.println(F("'></form>"));
+                
+                // New Password Reset Section
+                // Changed class for summary to remove button-link styling and added custom style for consistency
+                client.println(F("<details style='margin-top:10px;'><summary style='font-size:1.1em;font-weight:bold;cursor:pointer;padding:5px 0;text-align:center; outline: none; border: none;'>Reset Organizer Password</summary><div class='form-container' style='box-shadow:none;border:none;padding-top:5px;'>"));
+                client.println(F("<h3>Set New Organizer Password:</h3><form action='/' method='POST'><input type='hidden' name='action' value='setOrganizerPassword'>"));
+                client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
+                client.println(F("<label for='new_pass_input'>New Password:</label><input type='password' id='new_pass_input' name='new_password' required>"));
+                client.println(F("<input type='submit' value='Set New Password' class='button-link' style='background-color:#007bff;'></form></div></details>"));
+
                 client.println(F("<form action='/' method='POST' style='margin-top:10px;'><input type='hidden' name='action' value='exitOrganizer'>"));
                 client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
                 client.println(F("<input type='submit' value='Exit Organizer Mode' class='button-link secondary' style='background-color:#dc3545;'></form>"));
