@@ -772,7 +772,7 @@ void loop() {
             Serial.println("Received password update command via mesh.");
             // The content is the plaintext new password (decrypted by onDataRecv already)
             hashedOrganizerPassword = simpleHash(String(incomingMessage.content));
-            passwordChangeLocked = true; // Lock password change on this board (node is now capable)
+            passwordChangeLocked = true; // Lock change on this board (node is now capable)
             Serial.println("Organizer password updated via mesh. Local change locked. Node is now capable of sending messages.");
 
             // NEW: If a node receives an OTA password update and accepts it,
@@ -1235,11 +1235,15 @@ void loop() {
                       }
                   }
               } else if (actionParam == "exitOrganizer") {
+                  // Clear any previous feedback message before setting a new one for exit
+                  webFeedbackMessage = ""; 
                   if (isOrganizerSessionActive) { // Check if there's an active session to exit
                       organizerSessionToken = "";
                       isOrganizerSessionActive = false; // User exited web session
+                      webFeedbackMessage = "<p class='feedback' style='color:blue;'>Exited Organizer Mode.</p>";
+                  } else {
+                      webFeedbackMessage = "<p class='feedback' style='color:orange;'>Not currently in Organizer Mode.</p>"; // Provide feedback even if not active
                   }
-                  webFeedbackMessage = "<p class='feedback' style='color:blue;'>Exited Organizer Mode.</p>";
               } else if (actionParam == "togglePublic") {
                   // Only allow if organizer session is active AND node is capable (password set)
                   if (isOrganizerSessionActive && passwordChangeLocked) { 
