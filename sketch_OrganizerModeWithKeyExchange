@@ -496,7 +496,7 @@ void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len,
   totalMessagesSent++;
 
   // Special handling for discovery messages and password updates: DO NOT add to cache or local display log
-  if (type == MSG_TYPE_DISCOVERY || type == MSG_TYPE_PASSWORD_UPDATE) { // MODIFIED: Added check for MSG_TYPE_PASSWORD_UPDATE
+  if (type == MSG_TYPE_DISCOVERY || type == MSG_TYPE_PASSWORD_UPDATE) { 
       return; // Do not proceed further for these message types
   }
 
@@ -1058,7 +1058,7 @@ void loop() {
                           webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer message queued!</p>";
                       }
                   } else {
-                      webFeedbackMessage = "<p class class='feedback' style='color:red;'>Error: Invalid or expired session.</p>";
+                      webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Invalid or expired session.</p>";
                   }
               } else if (actionParam == "sendPublicMessage") {
                   if (!publicMessagingEnabled) {
@@ -1066,7 +1066,8 @@ void loop() {
                   } else if (decodedMessage.length() == 0) {
                       webFeedbackMessage = "<p class='feedback' style='color:orange;'>Please enter a message.</p>";
                   } else {
-                      decodedMessage = "Public: " + decodedMessage;
+                      // Removed the redundant "Public: " prefixing here.
+                      // The display logic will add it based on MSG_TYPE_PUBLIC.
                       if (decodedMessage.length() >= MAX_MESSAGE_CONTENT_LEN) {
                           decodedMessage = decodedMessage.substring(0, MAX_MESSAGE_CONTENT_LEN - 1);
                       }
@@ -1461,6 +1462,11 @@ void displayChatLogMode(int numLines) {
     else if (msg.messageType == MSG_TYPE_COMMAND) formattedLine += "Command: ";
     else if (msg.messageType == MSG_TYPE_AUTO_INIT) formattedLine += "Auto: ";
     formattedLine += String(msg.content);
+
+    // Ensure password update messages are not displayed
+    if (msg.messageType == MSG_TYPE_PASSWORD_UPDATE) { // MODIFIED: Added check to skip display for password updates
+        continue; 
+    }
     tft.println(formattedLine);
     linesPrinted++;
   }
