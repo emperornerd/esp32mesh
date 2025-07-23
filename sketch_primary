@@ -77,6 +77,7 @@ String organizerSessionToken = "";          // Stores the active organizer sessi
 unsigned long sessionTokenTimestamp = 0;    // Timestamp of when the token was created/last used
 const unsigned long SESSION_TIMEOUT_MS = 900000; // Session timeout: 15 minutes
 bool publicMessagingEnabled = false; // NOT PERSISTED
+bool publicMessagingLocked = false; // NEW: True if public messaging has been explicitly disabled by an organizer
 bool passwordChangeLocked = false; // NOT PERSISTED: True if organizer password has been set (node capable of sending)
 
 // New flag: Controls if a user is logged into the web UI as an organizer.
@@ -297,6 +298,7 @@ void addDisplayLog(const String& message) {
     // Copy the message content
     message.toCharArray(dummyMsg.content, MAX_MESSAGE_CONTENT_LEN);
     dummyMsg.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0'; // Ensure null termination
+    dummyMsg.checksum = calculateChecksum(dummyMsg.content, strlen(dummyMsg.content)); // Calculate checksum for consistency
 
     LocalDisplayEntry newEntry = {dummyMsg, millis()};
     localDisplayLog.push_back(newEntry);
@@ -558,6 +560,7 @@ void setup() {
   randomSeed(analogRead(0));
 
   publicMessagingEnabled = false;
+  publicMessagingLocked = false; // Initialize public messaging lock status as unlocked
   passwordChangeLocked = false; // Initialize password change lock status (node not capable)
   isOrganizerSessionActive = false; // Initialize web session as inactive
 
@@ -719,28 +722,40 @@ void loop() {
         memcpy(outgoingStatusResponse.originalSenderMac, ourMacBytes, 6); // Our MAC as sender
         outgoingStatusResponse.messageID = esp_random();
         outgoingStatusResponse.ttl = MAX_TTL_HOPS;
+        // Content now includes both publicMessagingEnabled and publicMessagingLocked status
         outgoingStatusResponse.content[0] = publicMessagingEnabled ? '1' : '0'; // '1' for enabled, '0' for disabled
-        outgoingStatusResponse.content[1] = '\0';
+        outgoingStatusResponse.content[1] = publicMessagingLocked ? '1' : '0'; // '1' for locked, '0' for unlocked
+        outgoingStatusResponse.content[2] = '\0';
         outgoingStatusResponse.checksum = calculateChecksum(outgoingStatusResponse.content, strlen(outgoingStatusResponse.content));
         
         // Encrypt content before sending
         prngStreamCipher((uint8_t*)outgoingStatusResponse.content, MAX_MESSAGE_CONTENT_LEN, PRE_SHARED_KEY, PRE_SHARED_KEY_LEN);
         
         createAndSendMessage("", 0, MSG_TYPE_STATUS_RESPONSE, incomingMessage.originalSenderMac); // Send unicast back to sender
-        Serial.printf("Sent STATUS_RESPONSE (publicEnabled=%s) to %02X:%02X:%02X:%02X:%02X:%02X\n",
-                      publicMessagingEnabled ? "true" : "false", MAC2STR(incomingMessage.originalSenderMac));
+        Serial.printf("Sent STATUS_RESPONSE (publicEnabled=%s, publicLocked=%s) to %02X:%02X:%02X:%02X:%02X:%02X\n",
+                      publicMessagingEnabled ? "true" : "false", publicMessagingLocked ? "true" : "false", MAC2STR(incomingMessage.originalSenderMac));
         continue; // Do not process this message further (no display, no re-broadcast)
     }
 
     // Handle MSG_TYPE_STATUS_RESPONSE
     if (incomingMessage.messageType == MSG_TYPE_STATUS_RESPONSE) {
         bool peerPublicStatus = (incomingMessage.content[0] == '1'); // Content is '1' or '0'
-        Serial.printf("Received STATUS_RESPONSE from %02X:%02X:%02X:%02X:%02X:%02X. Peer Public Enabled: %s\n",
-                      MAC2STR(incomingMessage.originalSenderMac), peerPublicStatus ? "true" : "false");
-        addDisplayLog(String("Peer ") + getMacSuffix(incomingMessage.originalSenderMac) + " Public Status: " + (peerPublicStatus ? "ENABLED" : "DISABLED"));
+        bool peerPublicLockedStatus = (incomingMessage.content[1] == '1'); // Content is '1' or '0'
+        Serial.printf("Received STATUS_RESPONSE from %02X:%02X:%02X:%02X:%02X:%02X. Peer Public Enabled: %s, Peer Public Locked: %s\n",
+                      MAC2STR(incomingMessage.originalSenderMac), peerPublicStatus ? "true" : "false", peerPublicLockedStatus ? "true" : "false");
+        addDisplayLog(String("Peer ") + getMacSuffix(incomingMessage.originalSenderMac) + " Public Status: " + (peerPublicStatus ? "ENABLED" : "DISABLED") + ", Locked: " + (peerPublicLockedStatus ? "YES" : "NO"));
         // Match the public messaging status to the sender's status
-        publicMessagingEnabled = peerPublicStatus; 
-        Serial.printf("Local publicMessagingEnabled set to: %s\n", publicMessagingEnabled ? "true" : "false");
+        // Only update if our current status is different and not locked
+        if (!publicMessagingLocked) { // Only update if we are not locally locked
+            publicMessagingEnabled = peerPublicStatus; 
+            Serial.printf("Local publicMessagingEnabled set to: %s (from peer status)\n", publicMessagingEnabled ? "true" : "false");
+        }
+        // If the peer is locked, and we are not, we should also lock
+        if (peerPublicLockedStatus && !publicMessagingLocked) {
+            publicMessagingLocked = true;
+            publicMessagingEnabled = false; // If locked, it must be disabled
+            Serial.println("Local publicMessagingLocked set to TRUE (from peer status). Public messaging DISABLED.");
+        }
         continue; // Do not process this message further (no re-broadcast)
     }
 
@@ -810,16 +825,25 @@ void loop() {
     // Command processing (now safe in loop after decryption)
     if (incomingMessage.messageType == MSG_TYPE_COMMAND) {
         if (incomingContent.equals(CMD_PUBLIC_ON)) {
-            if (!publicMessagingEnabled) {
-                publicMessagingEnabled = true;
-                Serial.println("Received command: ENABLE public messaging.");
-                webFeedbackMessage = "<p class='feedback' style='color:blue;'>Public messaging was ENABLED by an organizer.</p>";
+            // Only enable public messaging if it's not locked
+            if (!publicMessagingLocked) {
+                if (!publicMessagingEnabled) {
+                    publicMessagingEnabled = true;
+                    Serial.println("Received command: ENABLE public messaging.");
+                    webFeedbackMessage = "<p class='feedback' style='color:blue;'>Public messaging was ENABLED by an organizer.</p>";
+                }
+            } else {
+                Serial.println("Received command: ENABLE public messaging, but it is locked OFF. Ignoring.");
+                webFeedbackMessage = "<p class='feedback' style='color:orange;'>Public messaging is locked OFF by a previous organizer command. Cannot re-enable.</p>";
             }
         } else if (incomingContent.equals(CMD_PUBLIC_OFF)) {
-            if (publicMessagingEnabled) {
-                publicMessagingEnabled = false;
-                Serial.println("Received command: DISABLE public messaging.");
-                webFeedbackMessage = "<p class='feedback' style='color:blue;'>Public messaging was DISABLED by an organizer.</p>";
+            if (publicMessagingEnabled || !publicMessagingLocked) { // If it's currently enabled, or not yet locked
+                publicMessagingEnabled = false; // Disable it
+                publicMessagingLocked = true;   // Lock it permanently (until reboot)
+                Serial.println("Received command: DISABLE public messaging. Status is now LOCKED OFF.");
+                webFeedbackMessage = "<p class='feedback' style='color:blue;'>Public messaging was DISABLED and LOCKED OFF by an organizer.</p>";
+            } else {
+                Serial.println("Received command: DISABLE public messaging, but it was already locked OFF. No change.");
             }
         }
     }
@@ -1202,7 +1226,7 @@ void loop() {
                                   loginAttempts = 0;
                                   webFeedbackMessage = "<p class='feedback' style='color:red;'>Login locked for 5 minutes due to too many failures.</p>";
                               } else {
-                                  webFeedbackMessage = "<p class class='feedback' style='color:red;'>Incorrect password. " + String(MAX_LOGIN_ATTEMPTS - loginAttempts) + " attempts remaining.</p>";
+                                  webFeedbackMessage = "<p class='feedback' style='color:red;'>Incorrect password. " + String(MAX_LOGIN_ATTEMPTS - loginAttempts) + " attempts remaining.</p>";
                               }
                               // Clear nonce on failed login to force a new challenge
                               currentChallengeNonce = "";
@@ -1220,9 +1244,14 @@ void loop() {
                   // Only allow if organizer session is active AND node is capable (password set)
                   if (isOrganizerSessionActive && passwordChangeLocked) { 
                       sessionTokenTimestamp = millis();
-                      publicMessagingEnabled = !publicMessagingEnabled;
-                      webFeedbackMessage = "<p class='feedback' style='color:blue;'>Public messaging has been " + String(publicMessagingEnabled ? "ENABLED" : "DISABLED") + ".</p>";
-                      createAndSendMessage(publicMessagingEnabled ? CMD_PUBLIC_ON : CMD_PUBLIC_OFF, strlen(publicMessagingEnabled ? CMD_PUBLIC_ON : CMD_PUBLIC_OFF), MSG_TYPE_COMMAND);
+                      // Check if public messaging is locked OFF
+                      if (publicMessagingLocked) {
+                          webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Public messaging is locked OFF. Cannot re-enable.</p>";
+                      } else {
+                          publicMessagingEnabled = !publicMessagingEnabled;
+                          webFeedbackMessage = "<p class='feedback' style='color:blue;'>Public messaging has been " + String(publicMessagingEnabled ? "ENABLED" : "DISABLED") + ".</p>";
+                          createAndSendMessage(publicMessagingEnabled ? CMD_PUBLIC_ON : CMD_PUBLIC_OFF, strlen(publicMessagingEnabled ? CMD_PUBLIC_ON : CMD_PUBLIC_OFF), MSG_TYPE_COMMAND);
+                      }
                   } else {
                       webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Not logged in as organizer or node's password not set.</p>";
                   }
@@ -1265,7 +1294,12 @@ void loop() {
                           }
                       }
                   } else {
-                      webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Public messaging is disabled or node's password not set.</p>";
+                      // This message should only appear on the organizer page if an organizer tries to send a public message
+                      // when public messaging is disabled or the node is not capable.
+                      // For public users, the public message form is simply hidden if publicMessagingEnabled is false.
+                      if (isOrganizerSessionActive) { // Only show this feedback if an organizer is logged in
+                          webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Public messaging is disabled or node's password not set.</p>";
+                      }
                   }
               } else if (actionParam == "rebroadcastCache") {
                   // Only allow if organizer session is active AND node is capable (password set)
@@ -1291,8 +1325,10 @@ void loop() {
                       webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Not logged in as organizer or node's password not set.</p>";
                   }
               } else if (actionParam == "setOrganizerPassword") {
-                  // This action can be performed if in an organizer session OR if passwordChangeLocked is false (initial setup)
-                  if (isOrganizerSessionActive || !passwordChangeLocked) {
+                  // If passwordChangeLocked is true, we prevent changing it and show a message.
+                  if (passwordChangeLocked) {
+                      webFeedbackMessage = "<p class='feedback' style='color:red;'>The organizer password for this node cannot be changed after it has been set. To reset the password, you must reboot the board.</p>";
+                  } else if (isOrganizerSessionActive || !passwordChangeLocked) { // Proceed only if not locked
                       sessionTokenTimestamp = millis();
                       Serial.println("Attempting to set new password.");
                       Serial.print("Decoded New Password: '"); Serial.print(decodedNewPassword); Serial.println("'");
@@ -1304,10 +1340,6 @@ void loop() {
                           webFeedbackMessage = "<p class='feedback' style='color:red;'>New passwords do not match. Please try again.</p>";
                       }
                       else {
-                          // Password change is NOT locked here, as per user's request for no persistence.
-                          // The 'passwordChangeLocked' flag is only set to true *after* a password is set,
-                          // and it will reset on reboot.
-                          
                           // Update local hashed password
                           hashedOrganizerPassword = simpleHash(decodedNewPassword);
                           passwordChangeLocked = true; // Lock future password changes on this board immediately (node is now capable)
@@ -1324,6 +1356,8 @@ void loop() {
                           // this node is now capable of sending messages.
                       }
                   } else {
+                      // This else block handles cases where it's not locked but also not an active session
+                      // (e.g., trying to set initial password without a valid session, which shouldn't happen with the current UI flow)
                       webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Invalid or expired session to change password.</p>";
                   }
               }
@@ -1396,6 +1430,7 @@ void loop() {
             client.println(F("input[type=text],input[type=password]{width:80%;max-width:350px;padding:8px;margin-bottom:10px;border-radius:4px;border:1px solid #ccc;font-size:0.9em;}"));
             client.println(F("input[type=submit], .button-link{background-color:#007bff;color:white!important;padding:8px 15px;border:none;border-radius:4px;cursor:pointer;font-size:1em;transition:background-color 0.3s ease;text-decoration:none;display:block; margin: 0 auto;}"));
             client.println(F(".button-link.secondary{background-color:#6c757d;} .button-link.secondary:hover{background-color:#5a6268;}"));
+            client.println(F(".button-link.disabled{background-color:#cccccc; cursor: not-allowed;}")); // NEW: Style for disabled buttons
             client.println(F(".recent-senders-display-wrapper{display:flex;flex-direction:column;align-items:center;width:100%;max-width:450px;background:#e6f7ff;border:1px solid #cceeff;border-radius:12px;padding:10px 15px;font-size:0.75em;color:#0056b3;margin:15px auto;}"));
             client.println(F(".detected-nodes-label{font-weight:bold;margin-bottom:5px;color:#003366;}"));
             client.println(F(".detected-nodes-mac-list{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;width:100%;}"));
@@ -1570,40 +1605,59 @@ void loop() {
                     client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
                     if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
                     if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
-                    client.print(F("<input type='submit' value='"));
-                    client.print(publicMessagingEnabled ? "Disable Public Msgs" : "Enable Public Msgs");
-                    client.println(F("'></form>"));
                     
-                    // New Password Reset Section - only shown if capable
-                    client.println(F("<details style='margin-top:10px;'><summary style='font-size:1.1em;font-weight:bold;cursor:pointer;padding:5px 0;text-align:center; outline: none; border: none; background-color:#007bff; color:white; border-radius:4px;'>Reset Organizer Password</summary><div class='form-container' style='box-shadow:none;border:none;padding-top:5px;'>"));
-                    // Removed persistence-related message here
-                    client.println(F("<h3>Set New Organizer Password:</h3><form action='/' method='POST'><input type='hidden' name='action' value='setOrganizerPassword'>"));
-                    client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
-                    if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
-                    if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
-                    client.println(F("<label for='new_pass_input'>New Password:</label><input type='password' id='new_pass_input' name='new_password' required>"));
-                    client.println(F("<label for='confirm_new_pass_input'>Confirm New Password:</label><input type='password' id='confirm_new_pass_input' name='confirm_new_password' required>")); // Added confirm password field
-                    client.println(F("<input type='submit' value='Set New Password' class='button-link' style='background-color:#007bff;'></form>"));
-                    client.println(F("</div></details>"));
-
-                    client.println(F("<form action='/' method='POST' style='margin-top:10px;'><input type='hidden' name='action' value='exitOrganizer'>"));
-                    client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
-                    if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
-                    if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
-                    client.println(F("<input type='submit' value='Exit Organizer Mode' class='button-link secondary' style='background-color:#dc3545;'></form>"));
-                    client.println(F("</div></details>"));
+                    // NEW: Public messaging toggle button logic
+                    if (publicMessagingLocked) {
+                        client.print(F("<input type='submit' value='Public Msgs Locked (Off)' disabled class='button-link disabled'>"));
+                    } else {
+                        client.print(F("<input type='submit' value='"));
+                        client.print(publicMessagingEnabled ? "Disable Public Msgs" : "Enable Public Msgs");
+                        client.println(F("'></form>"));
+                    }
+                    client.println(F("</div>")); // Close Admin Actions form-container
                 } else {
                     // If session is active but node is not capable (password not set)
                     client.println(F("<p class='feedback' style='color:orange;'>You are logged in, but this node is not yet configured to send messages. Please set an organizer password to enable sending messages. Alternatively, if the password has already been set on another node in the mesh, this node will eventually receive it and enable sending.</p>"));
-                    client.println(F("<div class='form-container' style='box-shadow:none;border:none;padding-top:5px;'>"));
-                    client.println(F("<h3>Set New Organizer Password:</h3><form action='/' method='POST'><input type='hidden' name='action' value='setOrganizerPassword'>"));
-                    client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
-                    if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
-                    if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
-                    client.println(F("<label for='new_pass_input'>New Password:</label><input type='password' id='new_pass_input' name='new_password' required>"));
-                    client.println(F("<label for='confirm_new_pass_input'>Confirm New Password:</label><input type='password' id='confirm_new_pass_input' name='confirm_new_password' required>"));
-                    client.println(F("<input type='submit' value='Set New Password' class='button-link' style='background-color:#007bff;'></form></div>"));
                 }
+
+                // Always show Exit Organizer Mode button if logged in
+                client.println(F("<form action='/' method='POST' style='margin-top:10px;'><input type='hidden' name='action' value='exitOrganizer'>"));
+                client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
+                if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
+                if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
+                client.println(F("<input type='submit' value='Exit Organizer Mode' class='button-link secondary' style='background-color:#dc3545;'></form>"));
+
+                client.println(F("</div></details>")); // Close Organizer Controls details and form-container
+
+                // Password Management Section (Consolidated)
+                client.println(F("<details style='margin-top:10px;'><summary style='font-size:1.1em;font-weight:bold;cursor:pointer;padding:5px 0;text-align:center; outline: none; border: none; background-color:#007bff; color:white; border-radius:4px;'>Organizer Password Management</summary><div class='form-container' style='box-shadow:none;border:none;padding-top:5px;'>"));
+                client.println(F("<h3>Set/Reset Organizer Password:</h3>"));
+                client.println(F("<form action='/' method='POST'>"));
+                client.println(F("<input type='hidden' name='action' value='setOrganizerPassword'>"));
+                client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
+                if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
+                if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
+
+                String disabledAttr = passwordChangeLocked ? "disabled" : "";
+                String disabledClass = passwordChangeLocked ? "disabled" : "";
+                String explanationMessage = "";
+
+                if (passwordChangeLocked) {
+                    explanationMessage = "<p class='feedback' style='color:red; font-size:0.8em; margin-top:10px;'>The organizer password for this node cannot be changed after it has been set. To reset the password, you must reboot the board.</p>";
+                } else {
+                    explanationMessage = "<p class='feedback' style='color:blue; font-size:0.8em; margin-top:10px;'>Once the organizer password is set for this node, this option will be locked. To reset the password, you must reboot the board.</p>";
+                }
+
+                client.println(F("<label for='new_pass_input'>New Password:</label>"));
+                client.printf("<input type='password' id='new_pass_input' name='new_password' %s required>\n", disabledAttr.c_str());
+                client.println(F("<label for='confirm_new_pass_input'>Confirm New Password:</label>"));
+                client.printf("<input type='password' id='confirm_new_pass_input' name='confirm_new_password' %s required>\n", disabledAttr.c_str());
+                
+                client.printf("<input type='submit' value='Set New Password' class='button-link %s' %s>\n", disabledClass.c_str(), disabledAttr.c_str());
+                client.println(F("</form>"));
+                client.println(explanationMessage);
+                client.println(F("</div></details>"));
+
             } else { // Not in organizer session (isOrganizerSessionActive is false)
                 // If passwordChangeLocked is false, prompt to set initial password
                 if (!passwordChangeLocked) {
@@ -1613,7 +1667,9 @@ void loop() {
                     if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
                     client.println(F("<label for='new_pass_input'>New Password:</label><input type='password' id='new_pass_input' name='new_password' required>"));
                     client.println(F("<label for='confirm_new_pass_input'>Confirm New Password:</label><input type='password' id='confirm_new_pass_input' name='confirm_new_password' required>"));
-                    client.println(F("<input type='submit' value='Set Password' class='button-link' style='background-color:#007bff;'></form></div></details>"));
+                    client.println(F("<input type='submit' value='Set Password' class='button-link' style='background-color:#007bff;'></form>"));
+                    client.println(F("<p class='feedback' style='color:blue; font-size:0.8em; margin-top:10px;'>Once the organizer password is set for this node, this option will be hidden and you will need to log in to change it.</p>")); // Restored explanation
+                    client.println(F("</div></details>"));
                 } else { // Password has been set, prompt to log in
                     client.println(F("<details><summary>Enter Organizer Mode</summary><div class='form-container' style='box-shadow:none;border:none;padding-top:5px;'>"));
                     client.println(F("<form id='organizerLoginForm' action='/' method='POST'><input type='hidden' name='action' value='enterOrganizer'>"));
@@ -1849,6 +1905,7 @@ void displayStatsInfoMode() {
   tft.println("");
   tft.println("Mode Status:");
   tft.printf("  Public Msgs: %s\n", publicMessagingEnabled ? "ENABLED" : "DISABLED");
+  tft.printf("  Public Lock: %s\n", publicMessagingLocked ? "LOCKED" : "UNLOCKED"); // NEW: Display public lock status
   tft.printf("  Node Capable (Password Set): %s\n", passwordChangeLocked ? "YES" : "NO"); // Updated display for capability
 }
 #endif
