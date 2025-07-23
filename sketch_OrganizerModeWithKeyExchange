@@ -24,8 +24,10 @@ bool displayActive = false;
 #endif
 
 // Maximum content length for the message, allowing for null terminator after decryption.
-// Total message size: 4 (ID) + 6 (MAC) + 1 (TTL) + 1 (Type) + 238 (content array) = 250 bytes.
-#define MAX_MESSAGE_CONTENT_LEN 238 // Max actual content length
+// The total message size is 250 bytes. With the addition of a 2-byte checksum,
+// the content length is reduced from 238 to 236 bytes.
+// Total message size: 4 (ID) + 6 (MAC) + 1 (TTL) + 1 (Type) + 2 (Checksum) + 236 (content array) = 250 bytes.
+#define MAX_MESSAGE_CONTENT_LEN 236 // Max actual content length (reduced for checksum)
 #define MAX_TTL_HOPS 40 // Maximum Time-To-Live (hops) for a message
 
 // Message types for display prioritization
@@ -43,6 +45,7 @@ typedef struct __attribute__((packed)) {
   uint8_t originalSenderMac[6];
   uint8_t ttl;
   uint8_t messageType; // Field to identify message type (organizer, public, etc.)
+  uint16_t checksum;   // New field for integrity check
   char content[MAX_MESSAGE_CONTENT_LEN]; // Fixed size content buffer
 } esp_now_message_t;
 
@@ -51,14 +54,6 @@ typedef struct __attribute__((packed)) {
 const char* WEB_PASSWORD = "password";
 // Stores the hash of WEB_PASSWORD, calculated at setup.
 String hashedOrganizerPassword; 
-
-// Removed: Hardcoded trustedMACs list. Peers will now be auto-discovered.
-// const uint8_t trustedMACs[][6] = {
-//   {0x08, 0xA6, 0xF7, 0x47, 0xFA, 0xAD},    // MAC of node A (example, keep if correct for your setup)
-//   {0x14, 0x33, 0x5C, 0x6D, 0x74, 0x05},    // MAC of node B
-//   {0x14, 0x33, 0x5C, 0x6C, 0x3A, 0x99}     // MAC of node C
-// };
-// const int numTrusted = sizeof(trustedMACs) / sizeof(trustedMACs[0]); // Removed
 
 const int WIFI_CHANNEL = 1;
 
@@ -155,6 +150,15 @@ void prngStreamCipher(uint8_t* data, size_t dataLen, const uint8_t* key, size_t 
     for (size_t i = 0; i < dataLen; i++) {
         data[i] = data[i] ^ getPrngByte();
     }
+}
+
+// Function to calculate a simple checksum (sum of bytes)
+uint16_t calculateChecksum(const char* data, size_t len) {
+    uint16_t sum = 0;
+    for (size_t i = 0; i < len; ++i) {
+        sum += (uint8_t)data[i]; // Sum of byte values
+    }
+    return sum;
 }
 
 
@@ -333,6 +337,15 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
   prngStreamCipher((uint8_t*)incomingMessage.content, MAX_MESSAGE_CONTENT_LEN, PRE_SHARED_KEY, PRE_SHARED_KEY_LEN);
   incomingMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0'; // Ensure null termination after decryption
 
+  // Calculate checksum on the decrypted content
+  uint16_t calculatedChecksum = calculateChecksum(incomingMessage.content, strlen(incomingMessage.content));
+
+  // Check if the calculated checksum matches the received checksum
+  if (calculatedChecksum != incomingMessage.checksum) {
+      Serial.println("Checksum mismatch! Dropping message.");
+      return; // Drop the message if checksum verification fails
+  }
+
   // If message has no TTL left upon arrival, discard it.
   if (incomingMessage.ttl == 0) {
       return;
@@ -452,6 +465,9 @@ void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len,
   strncpy(newMessage.content, plaintext_data, len_to_copy);
   newMessage.content[len_to_copy] = '\0'; // Ensure null termination for plaintext
 
+  // Calculate checksum on plaintext content BEFORE encryption
+  newMessage.checksum = calculateChecksum(newMessage.content, strlen(newMessage.content));
+
   // Encrypt the message content before sending
   prngStreamCipher((uint8_t*)newMessage.content, MAX_MESSAGE_CONTENT_LEN, PRE_SHARED_KEY, PRE_SHARED_KEY_LEN);
 
@@ -474,6 +490,7 @@ void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len,
   // Decrypt for local display immediately after sending
   // Create a copy to decrypt for local display without altering the 'newMessage' that was sent.
   esp_now_message_t displayMessage = newMessage;
+  // The checksum is already part of displayMessage, no need to recalculate for display.
   prngStreamCipher((uint8_t*)displayMessage.content, MAX_MESSAGE_CONTENT_LEN, PRE_SHARED_KEY, PRE_SHARED_KEY_LEN); // Decrypt for display
   displayMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0'; // Ensure null termination
   LocalDisplayEntry newEntry = {displayMessage, millis()}; // Store message and its creation timestamp
