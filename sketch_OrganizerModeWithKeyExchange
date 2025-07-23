@@ -790,6 +790,10 @@ void loop() {
                     client.println(F("HTTP/1.1 200 OK"));
                     client.println(F("Content-type:text/plain"));
                     client.println(F("Connection: close"));
+                    // Added Cache-Control headers for challenge endpoint
+                    client.println(F("Cache-Control: no-cache, no-store, must-revalidate"));
+                    client.println(F("Pragma: no-cache"));
+                    client.println(F("Expires: 0"));
                     client.println();
                     client.print(currentChallengeNonce);
                     client.stop();
@@ -823,6 +827,10 @@ void loop() {
                     if (lowerPath == "/generate_204") {
                       client.println(F("HTTP/1.1 204 No Content"));
                       client.println(F("Connection: close"));
+                      // Added Cache-Control headers for 204 responses
+                      client.println(F("Cache-Control: no-cache, no-store, must-revalidate"));
+                      client.println(F("Pragma: no-cache"));
+                      client.println(F("Expires: 0"));
                       client.println();
                       client.stop();
                       return;
@@ -830,6 +838,10 @@ void loop() {
                       client.println(F("HTTP/1.1 200 OK"));
                       client.println(F("Content-Type: text/plain"));
                       client.println(F("Connection: close"));
+                      // Added Cache-Control headers for text/plain responses
+                      client.println(F("Cache-Control: no-cache, no-store, must-revalidate"));
+                      client.println(F("Pragma: no-cache"));
+                      client.println(F("Expires: 0"));
                       client.println();
                       client.println("Success");
                       client.stop();
@@ -838,6 +850,10 @@ void loop() {
                       client.println(F("HTTP/1.1 200 OK"));
                       client.println(F("Content-Type: text/html"));
                       client.println(F("Connection: close"));
+                      // Added Cache-Control headers for generic HTML success responses
+                      client.println(F("Cache-Control: no-cache, no-store, must-revalidate"));
+                      client.println(F("Pragma: no-cache"));
+                      client.println(F("Expires: 0"));
                       client.println();
                       client.println(F("<html><head><title>Success</title></head><body>Success</body></html>"));
                       client.stop();
@@ -852,6 +868,10 @@ void loop() {
                     client.println(F("HTTP/1.1 302 Found"));
                     client.println(F("Location: http://192.168.4.1/"));
                     client.println(F("Connection: close"));
+                    // Added Cache-Control headers for 302 redirects
+                    client.println(F("Cache-Control: no-cache, no-store, must-revalidate"));
+                    client.println(F("Pragma: no-cache"));
+                    client.println(F("Expires: 0"));
                     client.println();
                     client.stop();
                     return;
@@ -966,6 +986,10 @@ void loop() {
                               client.println(F("HTTP/1.1 303 See Other"));
                               client.println("Location: /?session_token=" + organizerSessionToken);
                               client.println(F("Connection: close"));
+                              // Added Cache-Control headers for 303 redirect after POST
+                              client.println(F("Cache-Control: no-cache, no-store, must-revalidate"));
+                              client.println(F("Pragma: no-cache"));
+                              client.println(F("Expires: 0"));
                               client.println();
                               client.stop();
                               return;
@@ -1056,7 +1080,7 @@ void loop() {
                           webFeedbackMessage = "<p class='feedback' style='color:orange;'>New password cannot be empty.</p>";
                       } else {
                           hashedOrganizerPassword = simpleHash(decodedNewPassword);
-                          webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer password updated successfully!</p>";
+                          webFeedbackMessage = "<p class class='feedback' style='color:green;'>Organizer password updated successfully!</p>";
                           loginAttempts = 0; // Reset login attempts on successful password change
                           lockoutTime = 0;
                       }
@@ -1072,6 +1096,10 @@ void loop() {
               }
               client.println("Location: " + redirectUrl);
               client.println(F("Connection: close"));
+              // Added Cache-Control headers for 303 redirect after POST
+              client.println(F("Cache-Control: no-cache, no-store, must-revalidate"));
+              client.println(F("Pragma: no-cache"));
+              client.println(F("Expires: 0"));
               client.println();
               client.stop();
               return;
@@ -1106,6 +1134,11 @@ void loop() {
             client.println(F("HTTP/1.1 200 OK"));
             client.println(F("Content-type:text/html"));
             client.println(F("Connection: close"));
+            // --- START: Added Cache-Control Headers for main HTML page ---
+            client.println(F("Cache-Control: no-cache, no-store, must-revalidate"));
+            client.println(F("Pragma: no-cache"));
+            client.println(F("Expires: 0"));
+            // --- END: Added Cache-Control Headers for main HTML page ---
             client.println();
             client.println(F("<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Protest Info Node</title><style>"));
             client.println(F("body{font-family:Helvetica,Arial,sans-serif;margin:0;padding:0;background-color:#f8f8f8;color:#333;display:flex;flex-direction:column;min-height:100vh;}"));
@@ -1123,9 +1156,6 @@ void loop() {
             client.println(F("input[type=submit], .button-link{background-color:#007bff;color:white!important;padding:8px 15px;border:none;border-radius:4px;cursor:pointer;font-size:1em;transition:background-color 0.3s ease;text-decoration:none;display:inline-block;}"));
             client.println(F("input[type=submit]:hover, .button-link:hover{background-color:#0056b3;}"));
             client.println(F(".button-link.secondary{background-color:#6c757d;} .button-link.secondary:hover{background-color:#5a6268;}"));
-            client.println(F("p.feedback{font-weight:bold;margin:10px auto;padding:8px;border-radius:5px;border:1px solid;max-width:90%;text-align:center;font-size:0.9em;}"));
-            client.println(F("p.feedback[style*='color:green']{background-color:#e6ffe6;border-color:#00cc00;} p.feedback[style*='color:red']{background-color:#ffe6e6;border-color:#cc0000;}"));
-            client.println(F("p.feedback[style*='color:orange']{background-color:#fff8e6;border-color:#ff9900;} p.feedback[style*='color:blue']{background-color:#e6f7ff;border-color:#007bff;}"));
             client.println(F(".recent-senders-display-wrapper{display:flex;flex-direction:column;align-items:center;width:100%;max-width:450px;background:#e6f7ff;border:1px solid #cceeff;border-radius:12px;padding:10px 15px;font-size:0.75em;color:#0056b3;margin:15px auto;}"));
             client.println(F(".detected-nodes-label{font-weight:bold;margin-bottom:5px;color:#003366;}"));
             client.println(F(".detected-nodes-mac-list{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;width:100%;}"));
