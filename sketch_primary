@@ -226,11 +226,18 @@ void displayDeviceInfoMode();
 void displayStatsInfoMode();
 #endif
 
-// A simple non-cryptographic hash function (DJB2 variant)
+// A simple non-cryptographic hash function (DJB2 variant) with a pseudo-salt
 String simpleHash(const String& input) {
-    unsigned long hash = 5381; // Initial value
-    for (int i = 0; i < input.length(); i++) {
-        hash = ((hash << 5) + hash) + input.charAt(i); // hash * 33 + c
+    // A hardcoded pseudo-salt. This is NOT a true cryptographic salt
+    // as it's fixed and known. Its purpose is to make rainbow table attacks
+    // against the *default* password slightly harder, as the hash will be
+    // different from a standard DJB2 hash of "password".
+    const String PSEUDO_SALT = "ProtestNodeSalt123XYZ"; 
+    String saltedInput = input + PSEUDO_SALT; // Concatenate input with pseudo-salt
+
+    unsigned long hash = 5381; // Initial value (DJB2 seed)
+    for (int i = 0; i < saltedInput.length(); i++) {
+        hash = ((hash << 5) + hash) + saltedInput.charAt(i); // hash * 33 + c
     }
     return String(hash, HEX); // Return as hex string
 }
@@ -679,7 +686,10 @@ void loop() {
   esp_now_message_t receivedMessage; // This message is already decrypted by onDataRecv
   bool messageProcessed = false;
   while (xQueueReceive(messageQueue, &receivedMessage, 0) == pdPASS) {
-    receivedMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0'; // Ensure null termination
+    // Decrypt the content after receiving from queue
+    prngStreamCipher((uint8_t*)receivedMessage.content, MAX_MESSAGE_CONTENT_LEN, PRE_SHARED_KEY, PRE_SHARED_KEY_LEN);
+    receivedMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0'; // Ensure null termination after decryption
+
     String incomingContent = String(receivedMessage.content);
     String originalSenderMacSuffix = getMacSuffix(receivedMessage.originalSenderMac);
 
@@ -1102,7 +1112,6 @@ void loop() {
                       if (decodedMessage.length() == 0) {
                           webFeedbackMessage = "<p class='feedback' style='color:orange;'>Please enter a message.</p>";
                       } else {
-                          if (urgentParam == "on") { decodedMessage = "Urgent: " + decodedMessage; }
                           if (decodedMessage.length() >= MAX_MESSAGE_CONTENT_LEN) {
                               decodedMessage = decodedMessage.substring(0, MAX_MESSAGE_CONTENT_LEN - 1);
                           }
@@ -1267,9 +1276,12 @@ void loop() {
             client.println(F("</style></head><body><script>"));
             // Re-added simpleHash function to client-side JS
             client.println(F("function simpleHash(input) {"));
+            client.println(F("    // Must match the C++ pseudo-salt for consistency"));
+            client.println(F("    const PSEUDO_SALT = 'ProtestNodeSalt123XYZ';"));
+            client.println(F("    const saltedInput = input + PSEUDO_SALT;"));
             client.println(F("    let hash = 5381;"));
-            client.println(F("    for (let i = 0; i < input.length; i++) {"));
-            client.println(F("        hash = ((hash << 5) + hash) + input.charCodeAt(i);"));
+            client.println(F("    for (let i = 0; i < saltedInput.length; i++) {"));
+            client.println(F("        hash = ((hash << 5) + hash) + saltedInput.charCodeAt(i);"));
             client.println(F("    }"));
             client.println(F("    return (hash >>> 0).toString(16); // Ensure positive and convert to hex"));
             client.println(F("}"));
@@ -1427,7 +1439,6 @@ void loop() {
                     client.println(F("<p class='feedback' style='color:orange;'>You are logged in, but this node is not yet authenticated to send messages. Please set a new organizer password to enable sending messages. Alternatively, if the password has already been set on another node in the mesh, this node will eventually receive it and enable sending.</p>"));
                     client.println(F("<div class='form-container' style='box-shadow:none;border:none;padding-top:5px;'>"));
                     client.println(F("<h3>Set New Organizer Password:</h3><form action='/' method='POST'><input type='hidden' name='action' value='setOrganizerPassword'>"));
-                    client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
                     client.println(F("<label for='new_pass_input'>New Password:</label><input type='password' id='new_pass_input' name='new_password' required>"));
                     client.println(F("<label for='confirm_new_pass_input'>Confirm New Password:</label><input type='password' id='confirm_new_pass_input' name='confirm_new_password' required>"));
                     client.println(F("<input type='submit' value='Set New Password' class='button-link' style='background-color:#007bff;'></form></div>"));
