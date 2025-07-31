@@ -23,6 +23,13 @@ bool displayActive = false;
 #define TFT_TOUCH_IRQ_PIN 36 // Example: Change to 39 if your board uses GPIO39 for T_IRQ
 #endif
 
+// --- Network Configuration Constants ---
+const int WIFI_CHANNEL = 1;
+const int WEB_SERVER_PORT = 80;
+const IPAddress AP_IP(192, 168, 4, 1);
+const IPAddress NET_MASK(255, 255, 255, 0);
+
+// --- Message & Protocol Constants ---
 // Maximum content length for the message, allowing for null terminator after decryption.
 // The total message size is 250 bytes. With the addition of a 2-byte checksum,
 // the content length is reduced from 238 to 236 bytes.
@@ -40,6 +47,11 @@ bool displayActive = false;
 #define MSG_TYPE_PASSWORD_UPDATE 6 // New message type for password updates
 #define MSG_TYPE_STATUS_REQUEST 7 // NEW: Request public enable/disable status
 #define MSG_TYPE_STATUS_RESPONSE 8 // NEW: Respond with public enable/disable status
+
+// Command prefixes
+const char* CMD_PREFIX = "CMD::";
+const char* CMD_PUBLIC_ON = "CMD::PUBLIC_ON";
+const char* CMD_PUBLIC_OFF = "CMD::PUBLIC_OFF";
 
 
 // Placing esp_now_message_t definition early to ensure it's recognized by the compiler.
@@ -61,9 +73,7 @@ const char* WEB_PASSWORD = "password";
 // Stores the hash of WEB_PASSWORD, calculated at setup, and updated on password reset.
 String hashedOrganizerPassword; 
 
-const int WIFI_CHANNEL = 1;
-
-WiFiServer server(80);
+WiFiServer server(WEB_SERVER_PORT);
 IPAddress IP; // This will store the actual IP of the SoftAP (192.168.4.1)
 String MAC_full_str; // Full MAC address of this ESP32 (e.g., "AA:BB:CC:DD:EE:FF")
 String MAC_suffix_str; // Last 4 chars of our MAC (e.g., "EEFF")
@@ -73,6 +83,7 @@ uint8_t ourMacBytes[6];
 String userMessageBuffer = "";  // To hold the user-entered message from POST
 String webFeedbackMessage = ""; // To send messages back to the web client (e.g., success/error)
 
+// --- Session & Authentication Constants ---
 String organizerSessionToken = "";          // Stores the active organizer session token
 unsigned long sessionTokenTimestamp = 0;    // Timestamp of when the token was created/last used
 const unsigned long SESSION_TIMEOUT_MS = 900000; // Session timeout: 15 minutes
@@ -93,22 +104,17 @@ String currentChallengeNonce = "";
 unsigned long challengeNonceTimestamp = 0;
 const unsigned long CHALLENGE_TIMEOUT_MS = 120000; // Increased to 120 seconds (2 minutes) for nonce validity
 
-const char* CMD_PREFIX = "CMD::";
-const char* CMD_PUBLIC_ON = "CMD::PUBLIC_ON";
-const char* CMD_PUBLIC_OFF = "CMD::PUBLIC_OFF";
-
+// --- Statistics Variables ---
 unsigned long totalMessagesSent = 0;
 unsigned long totalMessagesReceived = 0;
 unsigned long totalUrgentMessages = 0;
 
+// --- Timing & Interval Constants ---
 unsigned long lastRebroadcast = 0; // Timestamp for last re-broadcast
-// Variable to track last display refresh time
-const unsigned long DISPLAY_REFRESH_INTERVAL_MS = 10000;
+const unsigned long DISPLAY_REFRESH_INTERVAL_MS = 10000; // Display refresh interval
 unsigned long lastDisplayRefresh = 0;
-// Constant for local display log management interval (e.g., 5 seconds)
-const unsigned long LOCAL_DISPLAY_LOG_MANAGE_INTERVAL_MS = 5000;
+const unsigned long LOCAL_DISPLAY_LOG_MANAGE_INTERVAL_MS = 5000; // 5 seconds
 unsigned long lastLocalDisplayLogManage = 0;
-// Constant for last seen peers management interval
 const unsigned long LAST_SEEN_PEERS_MANAGE_INTERVAL_MS = 60000; // 60 seconds
 unsigned long lastSeenPeersManage = 0;
 
@@ -116,11 +122,10 @@ unsigned long lastSeenPeersManage = 0;
 const unsigned long PEER_DISCOVERY_INTERVAL_MS = 15000; // Send discovery every 15 seconds
 unsigned long lastDiscoveryBroadcast = 0;
 
+// Auto-rebroadcast interval
+const unsigned long AUTO_REBROADCAST_INTERVAL_MS = 30000; // 30 seconds
 
 int counter = 1; // Still used for the initial auto message
-
-IPAddress apIP(192, 168, 4, 1);
-IPAddress netMsk(255, 255, 255, 0);
 
 DNSServer dnsServer;
 
@@ -183,10 +188,11 @@ struct SeenMessage {
 std::vector<SeenMessage> seenMessages;
 portMUX_TYPE seenMessagesMutex = portMUX_INITIALIZER_UNLOCKED;
 
-// Increased cache duration and size for more robust message persistence across disconnections
+// --- Cache & Peer Management Constants ---
 const unsigned long DEDUP_CACHE_DURATION_MS = 1800000; // 30 minutes (was 10 minutes)
 const size_t MAX_CACHE_SIZE = 100; // Increased from 50
-const unsigned long AUTO_REBROADCAST_INTERVAL_MS = 30000; // 30 seconds
+const unsigned long PEER_LAST_SEEN_DURATION_MS = 600000; // 10 minutes for peer cleanup
+const unsigned long ESP_NOW_PEER_TIMEOUT_MS = 300000; // 5 minutes for ESP-NOW peer cleanup
 
 // Define a new struct for messages to be queued from ISR to loop()
 // This struct should contain only raw C-style data to avoid dynamic allocation in ISR
@@ -197,7 +203,7 @@ typedef struct {
 } IsrQueueMessage;
 
 QueueHandle_t messageQueue;
-#define QUEUE_SIZE 10
+const size_t QUEUE_SIZE = 10; // Size of the message queue
 
 // Struct to hold messages for local display, including timestamp for sorting
 struct LocalDisplayEntry {
@@ -208,16 +214,16 @@ std::vector<LocalDisplayEntry> localDisplayLog;
 portMUX_TYPE localDisplayLogMutex = portMUX_INITIALIZER_UNLOCKED; // Corrected initialization
 const size_t MAX_LOCAL_DISPLAY_LOG_SIZE = 50; // Max number of messages to keep in local display log
 const size_t NUM_ORGANIZER_MESSAGES_TO_RETAIN = 5; // Number of most recent organizer messages to always keep
+const size_t MAX_WEB_MESSAGE_INPUT_LENGTH = 226; // Max length for message input in HTML
+const size_t MAX_POST_BODY_LENGTH = 2048; // Max content length for POST requests
 
 // Map to store MACs of all peers from which messages have been received (for display and peer management)
 std::map<String, unsigned long> lastSeenPeers;
 portMUX_TYPE lastSeenPeersMutex = portMUX_INITIALIZER_UNLOCKED;
-const unsigned long PEER_LAST_SEEN_DURATION_MS = 600000; // 10 minutes for peer cleanup
 
 // New map for peers added to ESP-NOW for sending (dynamic list)
 std::map<String, unsigned long> espNowAddedPeers;
 portMUX_TYPE espNowAddedPeersMutex = portMUX_INITIALIZER_UNLOCKED;
-const unsigned long ESP_NOW_PEER_TIMEOUT_MS = 300000; // 5 minutes for ESP-NOW peer cleanup
 
 
 enum DisplayMode {
@@ -230,6 +236,9 @@ DisplayMode currentDisplayMode = MODE_CHAT_LOG;
 
 unsigned long lastTouchTime = 0;
 const unsigned long TOUCH_DEBOUNCE_MS = 500;
+const int TFT_CHAT_LOG_LINES = 22; // Number of lines to display in chat log mode
+const int TFT_URGENT_ONLY_LINES = 22; // Number of lines to display in urgent only mode
+const int MAX_NODES_TO_DISPLAY_TFT = 15; // Max nodes to display on TFT
 
 #if USE_DISPLAY
 void displayChatLogMode(int numLines);
@@ -408,7 +417,7 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
 
   // Queue the message for further processing in the main loop
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-  if (xQueueSendFromISR(messageQueue, &qMsg, &xHigherPriorityTaskWoken) != pdPASS) {
+  if (xQueueSendFromISR(messageQueue, &qMsg, 0) != pdPASS) {
     // Message dropped due to queue full
   }
   if (xHigherPriorityTaskWoken == pdTRUE) {
@@ -588,13 +597,13 @@ void setup() {
   MAC_suffix_str = getMacSuffix(ourMacBytes);
   ssid = "ProtestInfo_" + MAC_suffix_str;
 
-  WiFi.softAPConfig(apIP, apIP, netMsk);
+  WiFi.softAPConfig(AP_IP, AP_IP, NET_MASK);
   WiFi.softAP(ssid.c_str(), nullptr, WIFI_CHANNEL);
   IP = WiFi.softAPIP();
   server.begin();
 
-  dnsServer.start(53, "*", apIP);
-  Serial.println("DNS server started, redirecting all domains to: " + apIP.toString());
+  dnsServer.start(53, "*", AP_IP);
+  Serial.println("DNS server started, redirecting all domains to: " + AP_IP.toString());
 
   esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
 
@@ -610,7 +619,7 @@ void setup() {
   Serial.println("Display initialized");
   pinMode(TFT_TOUCH_IRQ_PIN, INPUT_PULLUP);
   Serial.printf("T_IRQ pin set to INPUT_PULLUP on GPIO%d\n", TFT_TOUCH_IRQ_PIN);
-  displayChatLogMode(22);
+  displayChatLogMode(TFT_CHAT_LOG_LINES);
 #endif
 
   if (esp_now_init() != ESP_OK) {
@@ -1392,8 +1401,9 @@ void loop() {
             for (auto const& [macStr, timestamp] : lastSeenPeers) { sortedSeenPeers.push_back({macStr, timestamp}); }
             std::sort(sortedSeenPeers.begin(), sortedSeenPeers.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
 
+            const int MAX_NODES_TO_DISPLAY_WEB = 4; // Max nodes to display on web interface
             for (const auto& macPair : sortedSeenPeers) { // Corrected typo here
-                if (count >= 4) break;
+                if (count >= MAX_NODES_TO_DISPLAY_WEB) break;
                 uint8_t macBytes[6];
                 unsigned int tempMac[6]; // Temporary array for sscanf
                 sscanf(macPair.first.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -1490,7 +1500,6 @@ void loop() {
             client.println(F("        feedbackDiv.className = 'feedback';"));
             client.println(F("        feedbackDiv.style.color = 'red';"));
             client.println(F("        feedbackDiv.textContent = 'Login failed: ' + error.message + '. Please try again.';"));
-            client.println(F("        loginForm.parentNode.insertBefore(feedbackDiv, loginForm);"));
             client.println(F("    }"));
             client.println(F("}"));
             client.println(F("document.addEventListener('DOMContentLoaded', () => {"));
@@ -1593,7 +1602,7 @@ void loop() {
                     if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
                     if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
 
-                    client.println(F("<label for='msg_input'>Message:</label><input type='text' id='msg_input' name='message' required maxlength='226'>"));
+                    client.printf(F("<label for='msg_input'>Message:</label><input type='text' id='msg_input' name='message' required maxlength='%d'>"), MAX_WEB_MESSAGE_INPUT_LENGTH);
                     client.println(F("<div style='display:flex;align-items:center;justify-content:center;width:80%;margin-bottom:10px;'><input type='checkbox' id='urgent_input' name='urgent' value='on' style='margin-right:8px;'><label for='urgent_input' style='margin-bottom:0;'>Urgent Message</label></div>"));
                     client.println(F("<input type='submit' value='Send Message'></form></div>"));
 
@@ -1667,7 +1676,7 @@ void loop() {
                     client.println(F("<label for='new_pass_input'>New Password:</label><input type='password' id='new_pass_input' name='new_password' required>"));
                     client.println(F("<label for='confirm_new_pass_input'>Confirm New Password:</label><input type='password' id='confirm_new_pass_input' name='confirm_new_password' required>"));
                     client.println(F("<input type='submit' value='Set Password' class='button-link' style='background-color:#007bff;'></form>"));
-                    client.println(F("<p class='feedback' style='color:blue; font-size:0.8em; margin-top:10px;'>Once the organizer password is set for this node, this option will be hidden and you will need to log in to change it.</p>")); // Restored explanation
+                    client.println(F("<p class='feedback' style='color:blue; font-size:0.8em; margin-top:10px;'>Once the organizer password is set for this node, this option will be hidden and you will need to reboot the node to change it.</p>")); // Restored explanation
                     client.println(F("</div></details>"));
                 } else { // Password has been set, prompt to log in
                     client.println(F("<details><summary>Enter Organizer Mode</summary><div class='form-container' style='box-shadow:none;border:none;padding-top:5px;'>"));
@@ -1686,7 +1695,7 @@ void loop() {
                     client.println(F("<h3>Message (no password required):</h3><form action='/' method='POST'><input type='hidden' name='action' value='sendPublicMessage'>"));
                     if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
                     if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
-                    client.println(F("<label for='pub_msg_input'>Message:</label><input type='text' id='pub_msg_input' name='message' required maxlength='226'>"));
+                    client.printf(F("<label for='pub_msg_input'>Message:</label><input type='text' id='pub_msg_input' name='message' required maxlength='%d'>"), MAX_WEB_MESSAGE_INPUT_LENGTH);
                     client.println(F("<input type='submit' value='Send Public Message'></form></div></details>"));
                 } else if (publicMessagingEnabled && !passwordChangeLocked) {
                     client.println(F("<p class='feedback' style='color:orange;'>Public messaging is enabled, but this node is not yet configured to send messages. Please set an organizer password to enable sending messages. Alternatively, if the password has already been set on another node in the mesh, this node will eventually receive it and enable sending.</p>"));
@@ -1709,7 +1718,7 @@ void loop() {
             }
             if (currentLine.startsWith("Content-Length: ")) {
               contentLength = currentLine.substring(16).toInt();
-              if (contentLength > 2048) {
+              if (contentLength > MAX_POST_BODY_LENGTH) {
                   Serial.printf("Error: Excessive Content-Length (%d). Closing connection to prevent DoS.\n", contentLength);
                   client.stop();
                   return;
@@ -1748,9 +1757,9 @@ void loop() {
   if (millis() - lastDisplayRefresh >= DISPLAY_REFRESH_INTERVAL_MS) {
     lastDisplayRefresh = millis();
     if (currentDisplayMode == MODE_CHAT_LOG) {
-      displayChatLogMode(22);
+      displayChatLogMode(TFT_CHAT_LOG_LINES);
     } else if (currentDisplayMode == MODE_URGENT_ONLY) {
-      displayUrgentOnlyMode(22);
+      displayUrgentOnlyMode(TFT_URGENT_ONLY_LINES);
     } else if (currentDisplayMode == MODE_DEVICE_INFO) {
       displayDeviceInfoMode();
     } else if (currentDisplayMode == MODE_STATS_INFO) {
@@ -1764,7 +1773,7 @@ void loop() {
 
     if (currentDisplayMode == MODE_CHAT_LOG) {
       currentDisplayMode = MODE_URGENT_ONLY;
-      displayUrgentOnlyMode(22);
+      displayUrgentOnlyMode(TFT_URGENT_ONLY_LINES);
     } else if (currentDisplayMode == MODE_URGENT_ONLY) {
       currentDisplayMode = MODE_DEVICE_INFO;
       displayDeviceInfoMode();
@@ -1774,7 +1783,7 @@ void loop() {
     }
     else {
       currentDisplayMode = MODE_CHAT_LOG;
-      displayChatLogMode(22);
+      displayChatLogMode(TFT_CHAT_LOG_LINES);
     }
     // Force a display refresh immediately after mode change
     lastDisplayRefresh = 0; // Reset timer to trigger immediate refresh
@@ -1854,12 +1863,11 @@ void displayDeviceInfoMode() {
   std::sort(sortedSeenPeers.begin(), sortedSeenPeers.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
 
   int linesPrinted = 0;
-  const int MAX_NODES_TO_DISPLAY = 15;
   if (sortedSeenPeers.empty()) {
     tft.println("  No other nodes detected yet.");
   } else {
     for (const auto& macPair : sortedSeenPeers) {
-        if (linesPrinted >= MAX_NODES_TO_DISPLAY) break;
+        if (linesPrinted >= MAX_NODES_TO_DISPLAY_TFT) break;
         uint8_t macBytes[6];
         unsigned int tempMac[6]; // Temporary array for sscanf
         sscanf(macPair.first.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X",
