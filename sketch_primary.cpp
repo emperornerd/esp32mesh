@@ -1795,8 +1795,8 @@ void loop() {
 void displayChatLogMode(int numLines) {
   tft.fillScreen(TFT_BLACK);
   tft.setCursor(0, 0);
-  tft.setTextColor(TFT_GREEN);      tft.println("MAC: " + MAC_full_str);
-  tft.setTextColor(TFT_GREEN);     tft.println("IP: " + IP.toString());
+  tft.setTextColor(TFT_GREEN);      tft.print("MAC: "); tft.println(MAC_full_str);
+  tft.setTextColor(TFT_GREEN);     tft.print("IP: "); tft.println(IP.toString());
   tft.setTextColor(TFT_GREEN);      tft.println("Mode: All Messages");
   tft.setTextColor(TFT_WHITE);     tft.println("----------------------");
   
@@ -1826,8 +1826,8 @@ void displayChatLogMode(int numLines) {
 void displayUrgentOnlyMode(int numLines) {
   tft.fillScreen(TFT_BLACK);
   tft.setCursor(0, 0);
-  tft.setTextColor(TFT_GREEN);      tft.println("MAC: " + MAC_full_str);
-  tft.setTextColor(TFT_GREEN);     tft.println("IP: " + IP.toString());
+  tft.setTextColor(TFT_GREEN);      tft.print("MAC: "); tft.println(MAC_full_str);
+  tft.setTextColor(TFT_GREEN);     tft.print("IP: "); tft.println(IP.toString());
   tft.setTextColor(TFT_GREEN);        tft.println("Mode: Urgent Only");
   tft.setTextColor(TFT_WHITE);     tft.println("----------------------");
 
@@ -1850,8 +1850,8 @@ void displayUrgentOnlyMode(int numLines) {
 void displayDeviceInfoMode() {
   tft.fillScreen(TFT_BLACK);
   tft.setCursor(0, 0);
-  tft.setTextColor(TFT_GREEN);      tft.println("MAC: " + MAC_full_str);
-  tft.setTextColor(TFT_GREEN);     tft.println("IP: " + IP.toString());
+  tft.setTextColor(TFT_GREEN);      tft.print("MAC: "); tft.println(MAC_full_str);
+  tft.setTextColor(TFT_GREEN);     tft.print("IP: "); tft.println(IP.toString());
   tft.setTextColor(TFT_GREEN);      tft.println("Mode: Device Info");
 
   tft.setTextColor(TFT_WHITE);     tft.println("----------------------");
@@ -1887,8 +1887,8 @@ void displayDeviceInfoMode() {
 void displayStatsInfoMode() {
   tft.fillScreen(TFT_BLACK);
   tft.setCursor(0, 0);
-  tft.setTextColor(TFT_GREEN);      tft.println("MAC: " + MAC_full_str);
-  tft.setTextColor(TFT_GREEN);     tft.println("IP: " + IP.toString());
+  tft.setTextColor(TFT_GREEN);      tft.print("MAC: "); tft.println(MAC_full_str);
+  tft.setTextColor(TFT_GREEN);     tft.print("IP: "); tft.println(IP.toString());
   tft.setTextColor(TFT_GREEN);      tft.println("Mode: Stats Info");
   tft.setTextColor(TFT_WHITE);     tft.println("----------------------");
 
