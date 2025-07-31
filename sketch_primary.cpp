@@ -406,7 +406,7 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
 
   // Check if the calculated checksum matches the received checksum
   if (calculatedChecksum != qMsg.messageData.checksum) {
-      // Serial.println("Checksum mismatch! Dropping message."); // Avoid Serial in ISR if possible
+      // Checksum mismatch! Dropping message.
       return; // Drop the message if checksum verification fails
   }
 
@@ -1676,7 +1676,7 @@ void loop() {
                     client.println(F("<label for='new_pass_input'>New Password:</label><input type='password' id='new_pass_input' name='new_password' required>"));
                     client.println(F("<label for='confirm_new_pass_input'>Confirm New Password:</label><input type='password' id='confirm_new_pass_input' name='confirm_new_password' required>"));
                     client.println(F("<input type='submit' value='Set Password' class='button-link' style='background-color:#007bff;'></form>"));
-                    client.println(F("<p class='feedback' style='color:blue; font-size:0.8em; margin-top:10px;'>Once the organizer password is set for this node, this option will be hidden and you will need to reboot the node to change it.</p>")); // Restored explanation
+                    client.println(F("<p class='feedback' style='color:blue; font-size:0.8em; margin-top:10px;'>Once the organizer password is set for this node, this option will be hidden and you will need to log in to change it.</p>")); // Restored explanation
                     client.println(F("</div></details>"));
                 } else { // Password has been set, prompt to log in
                     client.println(F("<details><summary>Enter Organizer Mode</summary><div class='form-container' style='box-shadow:none;border:none;padding-top:5px;'>"));
