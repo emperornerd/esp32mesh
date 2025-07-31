@@ -1421,7 +1421,7 @@ void loop() {
             client.println();
             client.println(F("<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Protest Info Node</title><style>"));
             client.println(F("body{font-family:Helvetica,Arial,sans-serif;margin:0;padding:0;background-color:#f8f8f8;color:#333;display:flex;flex-direction:column;min-height:100vh;}"));
-            client.println(F("header{background-color:#f0f0f0;padding:10px 15px;border-bottom:1px solid #ddd;text-align:center;}"));
+            client.println(F("header{background-color:#f0f0f0;padding:10px 15px;border-bottom:1px solid #ddd;text-align:center; display: flex; flex-direction: column; align-items: center; justify-content: center;}")); // Added flexbox for centering
             client.println(F("h1,h2,h3{margin:0;padding:5px 0;color:#333;text-align:center;} h1{font-size:1.4em;} h2{font-size:1.2em;} h3{font-size:1.1em;margin-bottom:10px;}"));
             client.println(F("p{margin:3px 0;font-size:0.9em;text-align:center;} .info-line{font-size:0.8em;color:#666;margin-bottom:10px;}"));
             client.println(F(".content-wrapper{display:flex;flex-direction:column;align-items:center;width:100%;max-width:900px;margin:15px auto;padding:0 10px;flex-grow:1;}"));
@@ -1435,9 +1435,9 @@ void loop() {
             client.println(F("input[type=submit], .button-link{background-color:#007bff;color:white!important;padding:8px 15px;border:none;border-radius:4px;cursor:pointer;font-size:1em;transition:background-color 0.3s ease;text-decoration:none;display:block; margin: 0 auto;}"));
             client.println(F(".button-link.secondary{background-color:#6c757d;} .button-link.secondary:hover{background-color:#5a6268;}"));
             client.println(F(".button-link.disabled{background-color:#cccccc; cursor: not-allowed;}")); // NEW: Style for disabled buttons
-            client.println(F(".recent-senders-display-wrapper{display:flex;flex-direction:column;align-items:center;width:100%;max-width:450px;background:#e6f7ff;border:1px solid #cceeff;border-radius:12px;padding:10px 15px;font-size:0.75em;color:#0056b3;margin:15px auto;}"));
+            client.println(F(".recent-senders-display-wrapper{display:flex;flex-direction:column;align-items:center;width:100%;max-width:450px;background:#e6f7ff;border:1px solid #cceeff;border-radius:12px;padding:10px 15px;font-size:0.75em;color:#0056b3;margin:15px auto; box-sizing: border-box;}")); // Added box-sizing
             client.println(F(".detected-nodes-label{font-weight:bold;margin-bottom:5px;color:#003366;}"));
-            client.println(F(".detected-nodes-mac-list{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;width:100%;}"));
+            client.println(F(".detected-nodes-mac-list{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;width:100%;}")); // Added flex-wrap
             client.println(F("</style></head><body><script>"));
             // Re-added simpleHash function to client-side JS
             client.println(F("function simpleHash(input) {"));
@@ -1636,30 +1636,25 @@ void loop() {
                 // Password Management Section (Consolidated)
                 client.println(F("<details style='margin-top:10px;'><summary style='font-size:1.1em;font-weight:bold;cursor:pointer;padding:5px 0;text-align:center; outline: none; border: none; background-color:#007bff; color:white; border-radius:4px;'>Organizer Password Management</summary><div class='form-container' style='box-shadow:none;border:none;padding-top:5px;'>"));
                 client.println(F("<h3>Set/Reset Organizer Password:</h3>"));
-                client.println(F("<form action='/' method='POST'>"));
-                client.println(F("<input type='hidden' name='action' value='setOrganizerPassword'>"));
-                client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
-                if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
-                if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
-
-                String disabledAttr = passwordChangeLocked ? "disabled" : "";
-                String disabledClass = passwordChangeLocked ? "disabled" : "";
-                String explanationMessage = "";
-
-                if (passwordChangeLocked) {
-                    explanationMessage = "<p class='feedback' style='color:red; font-size:0.8em; margin-top:10px;'>The organizer password for this node cannot be changed after it has been set. To reset the password, you must reboot the board.</p>";
-                } else {
-                    explanationMessage = "<p class='feedback' style='color:blue; font-size:0.8em; margin-top:10px;'>Once the organizer password is set for this node, this option will be locked. To reset the password, you must reboot the board.</p>";
-                }
-
-                client.println(F("<label for='new_pass_input'>New Password:</label>"));
-                client.printf("<input type='password' id='new_pass_input' name='new_password' %s required>\n", disabledAttr.c_str());
-                client.println(F("<label for='confirm_new_pass_input'>Confirm New Password:</label>"));
-                client.printf("<input type='password' id='confirm_new_pass_input' name='confirm_new_password' %s required>\n", disabledAttr.c_str());
                 
-                client.printf("<input type='submit' value='Set New Password' class='button-link %s' %s>\n", disabledClass.c_str(), disabledAttr.c_str());
-                client.println(F("</form>"));
-                client.println(explanationMessage);
+                if (passwordChangeLocked) {
+                    client.println(F("<p class='feedback' style='color:red; font-size:0.8em; margin-top:10px;'>The organizer password for this node cannot be changed after it has been set. To reset the password, you must reboot the board.</p>"));
+                } else {
+                    client.println(F("<form action='/' method='POST'>"));
+                    client.println(F("<input type='hidden' name='action' value='setOrganizerPassword'>"));
+                    client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
+                    if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
+                    if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
+
+                    client.println(F("<label for='new_pass_input'>New Password:</label>"));
+                    client.println(F("<input type='password' id='new_pass_input' name='new_password' required>"));
+                    client.println(F("<label for='confirm_new_pass_input'>Confirm New Password:</label>"));
+                    client.println(F("<input type='password' id='confirm_new_pass_input' name='confirm_new_password' required>"));
+                    
+                    client.println(F("<input type='submit' value='Set New Password' class='button-link'>"));
+                    client.println(F("</form>"));
+                    client.println(F("<p class='feedback' style='color:blue; font-size:0.8em; margin-top:10px;'>Once the organizer password is set for this node, this option will be locked. To reset the password, you must reboot the board.</p>"));
+                }
                 client.println(F("</div></details>"));
 
             } else { // Not in organizer session (isOrganizerSessionActive is false)
