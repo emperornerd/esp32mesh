@@ -1806,17 +1806,26 @@ void displayChatLogMode(int numLines) {
   for (const auto& entry : localDisplayLog) {
     if (linesPrinted >= numLines) break;
     const auto& msg = entry.message;
-    String formattedLine = "Node " + getMacSuffix(msg.originalSenderMac) + " - ";
-    if (msg.messageType == MSG_TYPE_ORGANIZER) formattedLine += "Organizer: ";
-    else if (msg.messageType == MSG_TYPE_PUBLIC) formattedLine += "Public: ";
-    else if (msg.messageType == MSG_TYPE_COMMAND) formattedLine += "Command: ";
-    else if (msg.messageType == MSG_TYPE_AUTO_INIT) formattedLine += "Auto: ";
-    formattedLine += String(msg.content);
+    char formattedLine[256]; // Use a fixed-size buffer
+    const char* messageTypePrefix = "";
 
+    // Determine message type prefix
+    if (msg.messageType == MSG_TYPE_ORGANIZER) messageTypePrefix = "Organizer: ";
+    else if (msg.messageType == MSG_TYPE_PUBLIC) messageTypePrefix = "Public: ";
+    else if (msg.messageType == MSG_TYPE_COMMAND) messageTypePrefix = "Command: ";
+    else if (msg.messageType == MSG_TYPE_AUTO_INIT) messageTypePrefix = "Auto: ";
+    
     // Ensure password update messages are not displayed
     if (msg.messageType == MSG_TYPE_PASSWORD_UPDATE) { 
         continue; 
     }
+
+    // Format the line using snprintf
+    snprintf(formattedLine, sizeof(formattedLine), "Node %s - %s%s", 
+             getMacSuffix(msg.originalSenderMac).c_str(), 
+             messageTypePrefix, 
+             msg.content);
+
     tft.println(formattedLine);
     linesPrinted++;
   }
@@ -1837,9 +1846,14 @@ void displayUrgentOnlyMode(int numLines) {
     if (linesPrinted >= numLines) break;
     const auto& msg = entry.message;
     if (String(msg.content).indexOf("Urgent: ") != -1) { // Check content for "Urgent: " prefix
-        String formattedLine = "Node " + getMacSuffix(msg.originalSenderMac) + " - ";
-        if (msg.messageType == MSG_TYPE_ORGANIZER) formattedLine += "Organizer: "; // Still include type for display
-        formattedLine += String(msg.content);
+        char formattedLine[256]; // Use a fixed-size buffer
+        const char* messageTypePrefix = "";
+        if (msg.messageType == MSG_TYPE_ORGANIZER) messageTypePrefix = "Organizer: "; // Still include type for display
+        
+        snprintf(formattedLine, sizeof(formattedLine), "Node %s - %s%s", 
+                 getMacSuffix(msg.originalSenderMac).c_str(), 
+                 messageTypePrefix, 
+                 msg.content);
         tft.println(formattedLine);
         linesPrinted++;
     }
