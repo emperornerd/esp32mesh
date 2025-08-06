@@ -37,9 +37,32 @@ The Protest Information Node provides a robust way for people to share messages 
 6. Upload: Click the "Upload" button (right arrow icon) to compile and flash the code to your ESP32.
 7. Once flashed, the ESP32 will reboot and automatically start its local Wi-Fi network and communication services.
 
-### nix
+### arduino-cli (via nix)
 
-This section TODO
+[flake.nix](./flake.nix) packages the `arduino-cli` command in a devshell.
+Nix users can use it like so:
+
+```bash
+ls /dev > /tmp/devices                # while unplugged
+                                      # then plug it in
+diff <(cat /tmp/devices) <(ls /dev)   # this will print the new devices
+ESP_PORT=/dev/tty.usbserial-1140      # the device may differ on your machine
+
+# Enter dev shell
+nix develop
+
+# Verify device connection
+arduino-cli board list
+
+# Compile and upload firmware
+arduino-cli compile --fqbn esp32:esp32:esp32 sketch_primary
+arduino-cli upload --fqbn esp32:esp32:esp32 -p $ESP_PORT sketch_primary  --upload-property upload.speed=115200
+
+# Monitor serial output
+# (if you see nothing, try press the reset button on the board)
+picocom -b 115200 $ESP_PORT
+# you should also see a "protestinfo" wifi network at this point
+```
 
 ## How to Use (Quick Start Guide)
 
