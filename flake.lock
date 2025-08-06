@@ -1,0 +1,133 @@
+{
+  "nodes": {
+    "arduino-index": {
+      "flake": false,
+      "locked": {
+        "narHash": "sha256-B7x2rEfG/VFo4JoYORqBG3kp6iQQ9UY70g9XsGPDbtQ=",
+        "type": "file",
+        "url": "https://downloads.arduino.cc/packages/package_index.json"
+      },
+      "original": {
+        "type": "file",
+        "url": "https://downloads.arduino.cc/packages/package_index.json"
+      }
+    },
+    "arduino-nix": {
+      "locked": {
+        "lastModified": 1735332078,
+        "narHash": "sha256-PGZVUTg8BQKL1QgTr3Fcia8RBYYqsbHbx9lIunqdmxQ=",
+        "owner": "bouk",
+        "repo": "arduino-nix",
+        "rev": "dd6c6f4de7d8d8bb460508de911c120dfc35b709",
+        "type": "github"
+      },
+      "original": {
+        "owner": "bouk",
+        "repo": "arduino-nix",
+        "type": "github"
+      }
+    },
+    "esp32-index": {
+      "flake": false,
+      "locked": {
+        "narHash": "sha256-fM6UKPdFonEOo9J7aRKupJh6k3rGnCJeyWxHiT0KNiE=",
+        "type": "file",
+        "url": "https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json"
+      },
+      "original": {
+        "type": "file",
+        "url": "https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json"
+      }
+    },
+    "flake-utils": {
+      "inputs": {
+        "systems": "systems"
+      },
+      "locked": {
+        "lastModified": 1731533236,
+        "narHash": "sha256-l0KFg5HjrsfsO/JpG+r7fRrqm12kzFHyUHqHCVpMMbI=",
+        "owner": "numtide",
+        "repo": "flake-utils",
+        "rev": "11707dc2f618dd54ca8739b309ec4fc024de578b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "numtide",
+        "repo": "flake-utils",
+        "type": "github"
+      }
+    },
+    "library-index": {
+      "flake": false,
+      "locked": {
+        "narHash": "sha256-dMUi2uUteqRI0+NoaoOPM2dtUwIsnICNjY2g3yXhipU=",
+        "type": "file",
+        "url": "https://downloads.arduino.cc/libraries/library_index.json"
+      },
+      "original": {
+        "type": "file",
+        "url": "https://downloads.arduino.cc/libraries/library_index.json"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1753939845,
+        "narHash": "sha256-K2ViRJfdVGE8tpJejs8Qpvvejks1+A4GQej/lBk5y7I=",
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "94def634a20494ee057c76998843c015909d6311",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nixos",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "arduino-index": "arduino-index",
+        "arduino-nix": "arduino-nix",
+        "esp32-index": "esp32-index",
+        "flake-utils": "flake-utils",
+        "library-index": "library-index",
+        "nixpkgs": "nixpkgs",
+        "tft-espi": "tft-espi"
+      }
+    },
+    "systems": {
+      "locked": {
+        "lastModified": 1681028828,
+        "narHash": "sha256-Vy1rq5AaRuLzOxct8nz4T6wlgyUR7zLU309k9mBC768=",
+        "owner": "nix-systems",
+        "repo": "default",
+        "rev": "da67096a3b9bf56a91d16901293e51ba5b49a27e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-systems",
+        "repo": "default",
+        "type": "github"
+      }
+    },
+    "tft-espi": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1720271054,
+        "narHash": "sha256-jPJGWqmE1duVPlWtrH5LCpjyLt9Y8MxhgaWPMyaxK+w=",
+        "owner": "Bodmer",
+        "repo": "TFT_eSPI",
+        "rev": "5793878d24161c1ed23ccb136f8564f332506d53",
+        "type": "github"
+      },
+      "original": {
+        "owner": "Bodmer",
+        "repo": "TFT_eSPI",
+        "type": "github"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
