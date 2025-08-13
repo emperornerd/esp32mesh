@@ -4,7 +4,7 @@
 #include <vector>     // For dynamic array for the cache
 #include <algorithm>  // For std::remove_if, std::min_element, std::sort
 #include <string.h>   // For strncpy and memset
-#include <set>        // For storing unique MACs for display (used for logic to pick 4 unique)
+#include <set>        // For storing unique MACs
 #include <map>        // For storing unique MACs with their last seen timestamp for sorting
 #include <DNSServer.h> // REQUIRED: Include for DNS server functionality
 #include <esp_system.h> // For esp_read_mac
@@ -43,10 +43,10 @@ const IPAddress NET_MASK(255, 255, 255, 0);
 #define MSG_TYPE_AUTO_INIT 2
 #define MSG_TYPE_COMMAND 3
 #define MSG_TYPE_UNKNOWN 4 // Default for messages without explicit type
-#define MSG_TYPE_DISCOVERY 5 // New message type for peer discovery
-#define MSG_TYPE_PASSWORD_UPDATE 6 // New message type for password updates
-#define MSG_TYPE_STATUS_REQUEST 7 // NEW: Request public enable/disable status
-#define MSG_TYPE_STATUS_RESPONSE 8 // NEW: Respond with public enable/disable status
+#define MSG_TYPE_DISCOVERY 5 // Message type for peer discovery
+#define MSG_TYPE_PASSWORD_UPDATE 6 // Message type for password updates
+#define MSG_TYPE_STATUS_REQUEST 7 // Request public enable/disable status
+#define MSG_TYPE_STATUS_RESPONSE 8 // Respond with public enable/disable status
 
 // Command prefixes
 const char* CMD_PREFIX = "CMD::";
@@ -61,7 +61,7 @@ typedef struct __attribute__((packed)) {
   uint8_t originalSenderMac[6];
   uint8_t ttl;
   uint8_t messageType; // Field to identify message type (organizer, public, etc.)
-  uint16_t checksum;   // New field for integrity check
+  uint16_t checksum;   // Field for integrity check
   char content[MAX_MESSAGE_CONTENT_LEN]; // Fixed size content buffer
 } esp_now_message_t;
 
@@ -88,10 +88,10 @@ String organizerSessionToken = "";          // Stores the active organizer sessi
 unsigned long sessionTokenTimestamp = 0;    // Timestamp of when the token was created/last used
 const unsigned long SESSION_TIMEOUT_MS = 900000; // Session timeout: 15 minutes
 bool publicMessagingEnabled = false; // NOT PERSISTED
-bool publicMessagingLocked = false; // NEW: True if public messaging has been explicitly disabled by an organizer
+bool publicMessagingLocked = false; // True if public messaging has been explicitly disabled by an organizer
 bool passwordChangeLocked = false; // NOT PERSISTED: True if organizer password has been set (node capable of sending)
 
-// New flag: Controls if a user is logged into the web UI as an organizer.
+// Controls if a user is logged into the web UI as an organizer.
 bool isOrganizerSessionActive = false; 
 
 int loginAttempts = 0;
@@ -194,7 +194,7 @@ const size_t MAX_CACHE_SIZE = 100; // Increased from 50
 const unsigned long PEER_LAST_SEEN_DURATION_MS = 600000; // 10 minutes for peer cleanup
 const unsigned long ESP_NOW_PEER_TIMEOUT_MS = 300000; // 5 minutes for ESP-NOW peer cleanup
 
-// Define a new struct for messages to be queued from ISR to loop()
+// Define a struct for messages to be queued from ISR to loop()
 // This struct should contain only raw C-style data to avoid dynamic allocation in ISR
 typedef struct {
     esp_now_message_t messageData; // The raw incoming message (already decrypted by onDataRecv)
@@ -221,9 +221,13 @@ const size_t MAX_POST_BODY_LENGTH = 2048; // Max content length for POST request
 std::map<String, unsigned long> lastSeenPeers;
 portMUX_TYPE lastSeenPeersMutex = portMUX_INITIALIZER_UNLOCKED;
 
-// New map for peers added to ESP-NOW for sending (dynamic list)
+// Map for peers added to ESP-NOW for sending (dynamic list)
 std::map<String, unsigned long> espNowAddedPeers;
 portMUX_TYPE espNowAddedPeersMutex = portMUX_INITIALIZER_UNLOCKED;
+
+// Set to store unique MACs of clients connected to our Soft AP
+std::set<String> apConnectedClients;
+portMUX_TYPE apClientsMutex = portMUX_INITIALIZER_UNLOCKED;
 
 
 enum DisplayMode {
@@ -360,6 +364,10 @@ void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_mes
     // Remove messages older than DEDUP_CACHE_DURATION_MS first
     seenMessages.erase(std::remove_if(seenMessages.begin(), seenMessages.end(),
                                      [currentTime](const SeenMessage& msg) {
+                                         // *** FIX: DO NOT REMOVE PASSWORD UPDATES FROM CACHE ***
+                                         if (msg.messageData.messageType == MSG_TYPE_PASSWORD_UPDATE) {
+                                             return false; // Never remove password updates based on time
+                                         }
                                          return (currentTime - msg.timestamp) > DEDUP_CACHE_DURATION_MS;
                                      }),
                       seenMessages.end());
@@ -368,9 +376,12 @@ void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_mes
     if (seenMessages.size() >= MAX_CACHE_SIZE) {
       auto oldest = std::min_element(seenMessages.begin(), seenMessages.end(),
                                      [](const SeenMessage& a, const SeenMessage& b) {
+                                         // Don't consider password updates as candidates for removal
+                                         if (a.messageData.messageType == MSG_TYPE_PASSWORD_UPDATE) return false;
+                                         if (b.messageData.messageType == MSG_TYPE_PASSWORD_UPDATE) return true;
                                          return a.timestamp < b.timestamp;
                                      });
-      if (oldest != seenMessages.end()) {
+      if (oldest != seenMessages.end() && oldest->messageData.messageType != MSG_TYPE_PASSWORD_UPDATE) {
         seenMessages.erase(oldest);
       }
     }
@@ -495,7 +506,7 @@ void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len,
   totalMessagesSent++;
 
   // Special handling for discovery messages: DO NOT add to cache or local display log
-  // Password updates (MSG_TYPE_PASSWORD_UPDATE) are now intended to be cached.
+  // Password updates (MSG_TYPE_PASSWORD_UPDATE) are intended to be cached.
   // Status requests/responses should also not be added to display log
   if (type == MSG_TYPE_DISCOVERY || type == MSG_TYPE_STATUS_REQUEST || type == MSG_TYPE_STATUS_RESPONSE) { 
       return; // Do not proceed further for these message types
@@ -563,6 +574,21 @@ void manageLocalDisplayLog() {
     portEXIT_CRITICAL(&localDisplayLogMutex);
 }
 
+// WiFi event handler function to track unique client connections to the AP
+void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+    if (event == ARDUINO_EVENT_WIFI_AP_STACONNECTED) {
+        char macStr[18];
+        snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 info.wifi_ap_staconnected.mac[0], info.wifi_ap_staconnected.mac[1],
+                 info.wifi_ap_staconnected.mac[2], info.wifi_ap_staconnected.mac[3],
+                 info.wifi_ap_staconnected.mac[4], info.wifi_ap_staconnected.mac[5]);
+        portENTER_CRITICAL(&apClientsMutex);
+        apConnectedClients.insert(String(macStr));
+        portEXIT_CRITICAL(&apClientsMutex);
+        Serial.printf("Station connected to AP: %s\n", macStr);
+        Serial.printf("Total unique clients: %d\n", apConnectedClients.size());
+    }
+}
 
 void setup() {
   Serial.begin(115200);
@@ -584,6 +610,9 @@ void setup() {
 
   WiFi.mode(WIFI_AP_STA);
   WiFi.setSleep(false);
+  
+  // Register WiFi event handler BEFORE starting AP
+  WiFi.onEvent(WiFiEvent);
 
   WiFi.softAP("placeholder", nullptr, WIFI_CHANNEL);
   delay(100);
@@ -603,7 +632,7 @@ void setup() {
   server.begin();
 
   dnsServer.start(53, "*", AP_IP);
-  Serial.println("DNS server started, redirecting all domains to: " + AP_IP.toString());
+  Serial.println("DNS server started, redirecting all domains to: " + IP.toString());
 
   esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
 
@@ -731,7 +760,7 @@ void loop() {
         memcpy(outgoingStatusResponse.originalSenderMac, ourMacBytes, 6); // Our MAC as sender
         outgoingStatusResponse.messageID = esp_random();
         outgoingStatusResponse.ttl = MAX_TTL_HOPS;
-        // Content now includes both publicMessagingEnabled and publicMessagingLocked status
+        // Content includes both publicMessagingEnabled and publicMessagingLocked status
         outgoingStatusResponse.content[0] = publicMessagingEnabled ? '1' : '0'; // '1' for enabled, '0' for disabled
         outgoingStatusResponse.content[1] = publicMessagingLocked ? '1' : '0'; // '1' for locked, '0' for unlocked
         outgoingStatusResponse.content[2] = '\0';
@@ -784,7 +813,7 @@ void loop() {
             passwordChangeLocked = true; // Lock change on this board (node is now capable)
             Serial.println("Organizer password updated via mesh. Local change locked. Node is now capable of sending messages.");
 
-            // NEW: If a node receives an OTA password update and accepts it,
+            // If a node receives an OTA password update and accepts it,
             // it immediately requests the sender's public status.
             Serial.printf("Password updated via OTA. Requesting public status from sender %02X:%02X:%02X:%02X:%02X:%02X\n", MAC2STR(incomingMessage.originalSenderMac));
             createAndSendMessage("", 0, MSG_TYPE_STATUS_REQUEST, incomingMessage.originalSenderMac); // Send unicast status request
@@ -806,7 +835,7 @@ void loop() {
     // or originated it. The re-broadcast logic is handled separately by the cache.
     if (!wasAlreadySeen) {
         totalMessagesReceived++;
-        // The urgent message count is now based on the content prefix, not message type directly
+        // The urgent message count is based on the content prefix, not message type directly
         if (String(incomingMessage.content).indexOf("Urgent: ") != -1) {
             totalUrgentMessages++;
         }
@@ -831,7 +860,7 @@ void loop() {
         }
     }
     
-    // Command processing (now safe in loop after decryption)
+    // Command processing (safe in loop after decryption)
     if (incomingMessage.messageType == MSG_TYPE_COMMAND) {
         if (incomingContent.equals(CMD_PUBLIC_ON)) {
             // Only enable public messaging if it's not locked
@@ -1370,7 +1399,7 @@ void loop() {
                       }
                   } else {
                       // This else block handles cases where it's not locked but also not an active session
-                      // (e.g., trying to set initial password without a valid session, which shouldn't happen with the current UI flow)
+                      // (e.g., trying to set initial password without a valid session, which shouldn't happen with the UI flow)
                       webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Invalid or expired session to change password.</p>";
                   }
               }
@@ -1444,7 +1473,7 @@ void loop() {
             client.println(F("input[type=text],input[type=password]{width:80%;max-width:350px;padding:8px;margin-bottom:10px;border-radius:4px;border:1px solid #ccc;font-size:0.9em;}"));
             client.println(F("input[type=submit], .button-link{background-color:#007bff;color:white!important;padding:8px 15px;border:none;border-radius:4px;cursor:pointer;font-size:1em;transition:background-color 0.3s ease;text-decoration:none;display:block; margin: 0 auto;}"));
             client.println(F(".button-link.secondary{background-color:#6c757d;} .button-link.secondary:hover{background-color:#5a6268;}"));
-            client.println(F(".button-link.disabled{background-color:#cccccc; cursor: not-allowed;}")); // NEW: Style for disabled buttons
+            client.println(F(".button-link.disabled{background-color:#cccccc; cursor: not-allowed;}")); // Style for disabled buttons
             client.println(F(".recent-senders-display-wrapper{display:flex;flex-direction:column;align-items:center;width:100%;max-width:450px;background:#e6f7ff;border:1px solid #cceeff;border-radius:12px;padding:10px 15px;font-size:0.75em;color:#0056b3;margin:15px auto; box-sizing: border-box;}")); // Added box-sizing
             client.println(F(".detected-nodes-label{font-weight:bold;margin-bottom:5px;color:#003366;}"));
             client.println(F(".detected-nodes-mac-list{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;width:100%;}")); // Added flex-wrap
@@ -1619,7 +1648,7 @@ void loop() {
                     if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
                     if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
                     
-                    // NEW: Public messaging toggle button logic
+                    // Public messaging toggle button logic
                     if (publicMessagingLocked) {
                         client.print(F("<input type='submit' value='Public Msgs Locked (Off)' disabled class='button-link disabled'>"));
                     } else {
@@ -1735,7 +1764,7 @@ void loop() {
   }
 
   // The userMessageBuffer is likely from a previous iteration or a placeholder.
-  // With the new authentication model, messages should primarily originate from the web UI.
+  // With the authentication model, messages should primarily originate from the web UI.
   // Keeping this for now, but it would also need to respect passwordChangeLocked.
   if (userMessageBuffer.length() > 0) {
     String messageContent = userMessageBuffer;
@@ -1747,7 +1776,7 @@ void loop() {
         messageType = MSG_TYPE_PUBLIC;
     }
 
-    // This part now relies on createAndSendMessage's internal capability check
+    // This part relies on createAndSendMessage's internal capability check
     createAndSendMessage(messageContent.c_str(), messageContent.length(), messageType);
     userMessageBuffer = "";
   }
@@ -1926,7 +1955,15 @@ void displayStatsInfoMode() {
   tft.println("");
   tft.println("Mode Status:");
   tft.printf("  Public Msgs: %s\n", publicMessagingEnabled ? "ENABLED" : "DISABLED");
-  tft.printf("  Public Lock: %s\n", publicMessagingLocked ? "LOCKED" : "UNLOCKED"); // NEW: Display public lock status
-  tft.printf("  Node Capable (Password Set): %s\n", passwordChangeLocked ? "YES" : "NO"); // Updated display for capability
+  tft.printf("  Public Lock: %s\n", publicMessagingLocked ? "LOCKED" : "UNLOCKED");
+  tft.printf("  Node Capable (Password Set): %s\n", passwordChangeLocked ? "YES" : "NO");
+  
+  // Display the unique AP client count
+  portENTER_CRITICAL(&apClientsMutex);
+  int uniqueClients = apConnectedClients.size();
+  portEXIT_CRITICAL(&apClientsMutex);
+  tft.println("");
+  tft.println("AP Stats:");
+  tft.printf("  Unique Clients: %d\n", uniqueClients);
 }
 #endif
