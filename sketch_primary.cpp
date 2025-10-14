@@ -1,19 +1,19 @@
 #include <WiFi.h>
 #include <esp_now.h>
-#include <esp_wifi.h> // Include for esp_wifi_set_channel
-#include <vector>     // For dynamic array for the cache
-#include <algorithm>  // For std::remove_if, std::min_element, std::sort
-#include <string.h>   // For strncpy and memset
-#include <set>        // For storing unique MACs
-#include <map>        // For storing unique MACs with their last seen timestamp for sorting
-#include <DNSServer.h> // REQUIRED: Include for DNS server functionality
-#include <esp_system.h> // For esp_read_mac
-#include <esp_mac.h>    // Corrected: Added .h for esp_mac
-#include <freertos/FreeRTOS.h> // Explicitly include FreeRTOS for queue types
-#include <freertos/queue.h>    // Explicitly include queue definitions
-#include <Preferences.h> // For storing data in non-volatile storage (NVS)
-#include "mbedtls/sha256.h" // For secure hashing with SHA-256
-#include "mbedtls/aes.h"    // For AES encryption
+#include <esp_wifi.h> // For esp_wifi_set_channel
+#include <vector>
+#include <algorithm>
+#include <string.h>
+#include <set>
+#include <map>
+#include <DNSServer.h>
+#include <esp_system.h>
+#include <esp_mac.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <Preferences.h>
+#include "mbedtls/sha256.h"
+#include "mbedtls/aes.h"
 
 #define USE_DISPLAY true
 
@@ -21,10 +21,12 @@
 #include <TFT_eSPI.h>
 TFT_eSPI tft = TFT_eSPI();
 bool displayActive = false;
-
-// Define the T_IRQ pin explicitly here for direct digitalRead debugging
-#define TFT_TOUCH_IRQ_PIN 36 // Example: Change to 39 if your board uses GPIO39 for T_IRQ
+// Define the T_IRQ pin explicitly for direct digitalRead debugging
+#define TFT_TOUCH_IRQ_PIN 36
 #endif
+
+// --- Debugging & Verbosity ---
+#define VERBOSE_MODE false // Set to true for detailed serial output, false for quiet operation
 
 // --- Network Configuration Constants ---
 const int WIFI_CHANNEL = 1;
@@ -33,69 +35,59 @@ const IPAddress AP_IP(192, 168, 4, 1);
 const IPAddress NET_MASK(255, 255, 255, 0);
 
 // --- Message & Protocol Constants ---
-// Maximum content length for the message. Must be a multiple of 16 for AES block cipher.
-// The total message size is 250 bytes.
-// Total message size: 4 (ID) + 6 (MAC) + 1 (TTL) + 1 (Type) + 2 (Checksum) + 224 (content array) = 238 bytes.
-#define MAX_MESSAGE_CONTENT_LEN 224 // Max content length, adjusted for AES-128 block size (16 bytes)
-#define MAX_TTL_HOPS 40 // Maximum Time-To-Live (hops) for a message
+// Maximum content length, must be a multiple of 16 for AES. Total message size is 238 bytes.
+#define MAX_MESSAGE_CONTENT_LEN 224
+#define MAX_TTL_HOPS 40
 
-// Message types for display prioritization
+// Message types for processing and display
 #define MSG_TYPE_ORGANIZER 0
 #define MSG_TYPE_PUBLIC 1
 #define MSG_TYPE_AUTO_INIT 2
 #define MSG_TYPE_COMMAND 3
-#define MSG_TYPE_UNKNOWN 4 // Default for messages without explicit type
-#define MSG_TYPE_DISCOVERY 5 // Message type for peer discovery
-#define MSG_TYPE_PASSWORD_UPDATE 6 // Message type for password updates
-#define MSG_TYPE_STATUS_REQUEST 7 // Request public enable/disable status
-#define MSG_TYPE_STATUS_RESPONSE 8 // Respond with public enable/disable status
-#define MSG_TYPE_JAMMING_ALERT 9 // Message type for jamming alerts
+#define MSG_TYPE_UNKNOWN 4
+#define MSG_TYPE_DISCOVERY 5
+#define MSG_TYPE_PASSWORD_UPDATE 6
+#define MSG_TYPE_STATUS_REQUEST 7
+#define MSG_TYPE_STATUS_RESPONSE 8
+#define MSG_TYPE_JAMMING_ALERT 9
 
 // Command prefixes
 const char* CMD_PREFIX = "CMD::";
 const char* CMD_PUBLIC_ON = "CMD::PUBLIC_ON";
 const char* CMD_PUBLIC_OFF = "CMD::PUBLIC_OFF";
 
-
-// Placing esp_now_message_t definition early to ensure it's recognized by the compiler.
-// This uses the typedef struct syntax as provided in your original working code.
 typedef struct __attribute__((packed)) {
   uint32_t messageID;
   uint8_t originalSenderMac[6];
   uint8_t ttl;
-  uint8_t messageType; // Field to identify message type (organizer, public, etc.)
-  uint16_t checksum;   // Field for integrity check
-  char content[MAX_MESSAGE_CONTENT_LEN]; // Fixed size content buffer
+  uint8_t messageType;
+  uint16_t checksum;
+  char content[MAX_MESSAGE_CONTENT_LEN];
 } esp_now_message_t;
 
-
-// The plaintext password for organizer access. This will be hashed at runtime.
-// NOTE: This initial value is used only once at setup to generate the initial hashedOrganizerPassword.
-// The actual password for login will be stored and updated in hashedOrganizerPassword.
-const char* WEB_PASSWORD = "password"; 
-// Stores the hash of WEB_PASSWORD, calculated at setup, and updated on password reset.
-String hashedOrganizerPassword; 
+// This initial password is used once at setup to generate the initial hash for the web UI.
+const char* WEB_PASSWORD = "password";
+// Stores the hash of the organizer password for web UI authentication.
+String hashedOrganizerPassword;
 
 WiFiServer server(WEB_SERVER_PORT);
-IPAddress IP; // This will store the actual IP of the SoftAP (192.168.4.1)
-String MAC_full_str; // Full MAC address of this ESP32 (e.g., "AA:BB:CC:DD:EE:FF")
-String MAC_suffix_str; // Last 4 chars of our MAC (e.g., "EEFF")
-String ssid; // Our unique SSID
+IPAddress IP;
+String MAC_full_str;
+String MAC_suffix_str;
+String ssid;
 uint8_t ourMacBytes[6];
 
-String userMessageBuffer = "";  // To hold the user-entered message from POST
-String webFeedbackMessage = ""; // To send messages back to the web client (e.g., success/error)
+String userMessageBuffer = "";
+String webFeedbackMessage = "";
 
 // --- Session & Authentication Constants ---
-String organizerSessionToken = "";          // Stores the active organizer session token
-unsigned long sessionTokenTimestamp = 0;    // Timestamp of when the token was created/last used
-const unsigned long SESSION_TIMEOUT_MS = 900000; // Session timeout: 15 minutes
-bool publicMessagingEnabled = false; // NOT PERSISTED
-bool publicMessagingLocked = false; // True if public messaging has been explicitly disabled by an organizer
-bool passwordChangeLocked = false; // NOT PERSISTED: True if organizer password has been set (node capable of sending)
-
-// Controls if a user is logged into the web UI as an organizer.
-bool isOrganizerSessionActive = false; 
+String organizerSessionToken = "";
+unsigned long sessionTokenTimestamp = 0;
+const unsigned long SESSION_TIMEOUT_MS = 900000; // 15 minutes
+bool publicMessagingEnabled = false; // Volatile
+bool publicMessagingLocked = false;  // Volatile
+bool passwordChangeLocked = false; // Volatile: True if organizer password has been set
+bool isOrganizerSessionActive = false;
 
 int loginAttempts = 0;
 unsigned long lockoutTime = 0;
@@ -108,157 +100,185 @@ unsigned long totalMessagesReceived = 0;
 unsigned long totalUrgentMessages = 0;
 
 // --- Jamming Detection & Security Logging Variables ---
-Preferences preferences; // NVS object for permanent storage
-const unsigned long JAMMING_DETECTION_THRESHOLD_MS = 60000; // 60 seconds of no messages from known peers
-const unsigned long JAMMING_ALERT_COOLDOWN_MS = 60000;     // Send alerts at most once per minute
-const unsigned long JAMMING_MEMORY_RESET_MS = 300000;      // Reset long-term memory after 5 minutes of normal operation
-unsigned long lastMessageReceivedTimestamp = 0; // Timestamp of the last received message
-bool isCurrentlyJammed = false; // Current status of jamming detection
-unsigned long lastJammingEventTimestamp = 0; // "Long-term memory" for jamming, 0 = never detected
-unsigned long lastJammingAlertSent = 0;      // To manage alert cooldown
-unsigned long communicationRestoredTimestamp = 0; // Timestamp for when communication was restored
-uint32_t jammingIncidentCount = 0; // Counter for jamming incidents (persisted in NVS)
-uint32_t hashFailureCount = 0; // Counter for hash/checksum failures (persisted in NVS)
-const int MAX_FAIL_LOG_ENTRIES = 3; // Store last 3 hash failure examples in NVS
+Preferences preferences; // Used for all security logs now
+const unsigned long JAMMING_DETECTION_THRESHOLD_MS = 60000; // 60 seconds
+const unsigned long JAMMING_ALERT_COOLDOWN_MS = 60000;
+const unsigned long JAMMING_MEMORY_RESET_MS = 300000;
+unsigned long lastMessageReceivedTimestamp = 0;
+bool isCurrentlyJammed = false;
+unsigned long lastJammingEventTimestamp = 0;
+unsigned long lastJammingAlertSent = 0;
+unsigned long communicationRestoredTimestamp = 0;
+uint32_t jammingIncidentCount = 0; // Persisted in NVS
+uint32_t hashFailureCount = 0;     // Persisted in NVS
+const int MAX_FAIL_LOG_ENTRIES = 3;
+
+// --- Infiltration Detection & Security Logging Variables ---
+const unsigned long INFILTRATION_WINDOW_MS = 300000; // 5 minutes
+const int INFILTRATION_THRESHOLD = 2; // More than 2 unique passwords (i.e., 3+) triggers the alert
+bool isInfiltrationAlert = false; // Volatile
+unsigned long lastInfiltrationEventTimestamp = 0;
+uint32_t infiltrationIncidentCount = 0; // Persisted in NVS
+const int MAX_INFIL_LOG_ENTRIES = 3;
+
+struct PasswordUpdateEvent {
+    unsigned long timestamp;
+    String passwordHash;
+    uint8_t senderMac[6];
+};
+std::vector<PasswordUpdateEvent> passwordUpdateHistory;
+portMUX_TYPE passwordUpdateHistoryMutex = portMUX_INITIALIZER_UNLOCKED;
 
 // --- Timing & Interval Constants ---
-unsigned long lastRebroadcast = 0; // Timestamp for last re-broadcast
-const unsigned long DISPLAY_REFRESH_INTERVAL_MS = 10000; // Display refresh interval
+unsigned long lastRebroadcast = 0;
+const unsigned long DISPLAY_REFRESH_INTERVAL_MS = 10000;
 unsigned long lastDisplayRefresh = 0;
-const unsigned long LOCAL_DISPLAY_LOG_MANAGE_INTERVAL_MS = 5000; // 5 seconds
+const unsigned long LOCAL_DISPLAY_LOG_MANAGE_INTERVAL_MS = 5000;
 unsigned long lastLocalDisplayLogManage = 0;
-const unsigned long LAST_SEEN_PEERS_MANAGE_INTERVAL_MS = 60000; // 60 seconds
+const unsigned long LAST_SEEN_PEERS_MANAGE_INTERVAL_MS = 60000;
 unsigned long lastSeenPeersManage = 0;
-
-// Discovery message interval
-const unsigned long PEER_DISCOVERY_INTERVAL_MS = 15000; // Send discovery every 15 seconds
+const unsigned long PEER_DISCOVERY_INTERVAL_MS = 15000;
 unsigned long lastDiscoveryBroadcast = 0;
-
-// Auto-rebroadcast interval
-const unsigned long AUTO_REBROADCAST_INTERVAL_MS = 30000; // 30 seconds
-
-int counter = 1; // Still used for the initial auto message
+const unsigned long AUTO_REBROADCAST_INTERVAL_MS = 30000;
 
 DNSServer dnsServer;
 
-// Define a Pre-Shared Key (PSK) for symmetric encryption
-// This key must be identical on all participating nodes.
-// MUST be 16 bytes (128 bits) for AES-128.
+// The default factory key, used ONLY for bootstrapping (distributing the session key).
 const uint8_t PRE_SHARED_KEY[] = {
-  0x1A, 0x2B, 0x3C, 0x4D, 0x5E, 0x6F, 0x70, 0x81,
-  0x92, 0xA3, 0xB4, 0xC5, 0xD6, 0xE7, 0xF8, 0x09
+  0x7C, 0xE3, 0x91, 0x2F, 0xA8, 0x5D, 0xB4, 0x69,
+  0x3E, 0xC7, 0x14, 0xF2, 0x86, 0x0B, 0xD9, 0x4A
 };
-const size_t PRE_SHARED_KEY_LEN = sizeof(PRE_SHARED_KEY);
+// The session key, derived from the organizer password, used for all other traffic.
+uint8_t sessionKey[16]; // Volatile
+bool useSessionKey = false; // Volatile
 
-// --- START: AES-ECB Encryption/Decryption ---
-// NOTE: ECB mode is not recommended for most applications as it is not semantically
-// secure. However, implementing as requested for simplicity.
-// This function encrypts data in-place using AES-128 ECB mode.
-void aesEcbEncrypt(uint8_t* data, size_t dataLen) {
+// --- START: AES-CTR Encryption/Decryption ---
+// Helper function for AES-CTR encryption/decryption.
+void aesCtrCrypt(uint8_t* data, size_t dataLen, uint32_t messageID, const uint8_t* mac, const uint8_t* key) {
     mbedtls_aes_context aes;
     mbedtls_aes_init(&aes);
+    mbedtls_aes_setkey_enc(&aes, key, 128);
 
-    // Set the encryption key (128 bits)
-    mbedtls_aes_setkey_enc(&aes, PRE_SHARED_KEY, 128);
+    unsigned char nonce_counter[16] = {0};
+    memcpy(nonce_counter, &messageID, sizeof(messageID));
+    memcpy(nonce_counter + sizeof(messageID), mac, 6);
 
-    // Encrypt block by block (16 bytes at a time)
-    for (size_t i = 0; i < dataLen; i += 16) {
-        mbedtls_aes_crypt_ecb(&aes, MBEDTLS_AES_ENCRYPT, data + i, data + i);
-    }
+    size_t nc_off = 0;
+    unsigned char stream_block[16] = {0};
 
+    mbedtls_aes_crypt_ctr(&aes, dataLen, &nc_off, nonce_counter, stream_block, data, data);
     mbedtls_aes_free(&aes);
 }
 
-// This function decrypts data in-place using AES-128 ECB mode.
-void aesEcbDecrypt(uint8_t* data, size_t dataLen) {
-    mbedtls_aes_context aes;
-    mbedtls_aes_init(&aes);
-
-    // Set the decryption key (128 bits)
-    mbedtls_aes_setkey_dec(&aes, PRE_SHARED_KEY, 128);
-
-    // Decrypt block by block (16 bytes at a time)
-    for (size_t i = 0; i < dataLen; i += 16) {
-        mbedtls_aes_crypt_ecb(&aes, MBEDTLS_AES_DECRYPT, data + i, data + i);
-    }
-
-    mbedtls_aes_free(&aes);
+// Wrapper for encryption, passes the specified key.
+void aesCtrEncrypt(uint8_t* data, size_t dataLen, uint32_t messageID, const uint8_t* mac, const uint8_t* key) {
+    aesCtrCrypt(data, dataLen, messageID, mac, key);
 }
-// --- END: AES-ECB Encryption/Decryption ---
 
+// Wrapper for decryption, passes the specified key.
+void aesCtrDecrypt(uint8_t* data, size_t dataLen, uint32_t messageID, const uint8_t* mac, const uint8_t* key) {
+    aesCtrCrypt(data, dataLen, messageID, mac, key);
+}
+// --- END: AES-CTR Encryption/Decryption ---
 
-// Function to calculate a simple checksum (sum of bytes)
+// A secure SHA-256 hash function with a pseudo-salt for the web UI.
+String simpleHash(const String& input) {
+    // The pseudo-salt ensures the hash is unique to this application.
+    const String PSEUDO_SALT = "ProtestNodeSalt123XYZ";
+    String saltedInput = input + PSEUDO_SALT;
+    unsigned char hashOutput[32];
+    mbedtls_sha256_context ctx;
+    mbedtls_sha256_init(&ctx);
+    mbedtls_sha256_starts(&ctx, 0); // 0 for SHA-256
+    mbedtls_sha256_update(&ctx, (const unsigned char*)saltedInput.c_str(), saltedInput.length());
+    mbedtls_sha256_finish(&ctx, hashOutput);
+    mbedtls_sha256_free(&ctx);
+
+    String hashString = "";
+    for(int i = 0; i < sizeof(hashOutput); i++){
+        char hex[3];
+        sprintf(hex, "%02x", hashOutput[i]);
+        hashString += hex;
+    }
+    return hashString;
+}
+
+// Derives a 16-byte session key from a password and sets state. All changes are VOLATILE.
+void deriveAndSetSessionKey(const String& password) {
+    unsigned char hash[32];
+    mbedtls_sha256((const unsigned char*)password.c_str(), password.length(), hash, 0);
+    memcpy(sessionKey, hash, 16); // Use first 16 bytes of SHA-256 hash as the AES key
+    useSessionKey = true;
+    passwordChangeLocked = true;
+    hashedOrganizerPassword = simpleHash(password); // For web UI authentication
+    if(VERBOSE_MODE) Serial.println("Volatile session key derived from password.");
+}
+
 uint16_t calculateChecksum(const char* data, size_t len) {
     uint16_t sum = 0;
     for (size_t i = 0; i < len; ++i) {
-        sum += (uint8_t)data[i]; // Sum of byte values
+        sum += (uint8_t)data[i];
     }
     return sum;
 }
-
 
 struct SeenMessage {
   uint32_t messageID;
   uint8_t originalSenderMac[6];
   unsigned long timestamp;
-  esp_now_message_t messageData; // Store the full message data (encrypted) for re-broadcasting
+  esp_now_message_t messageData; // Stores the full message data (encrypted) for re-broadcasting
 };
-
 std::vector<SeenMessage> seenMessages;
 portMUX_TYPE seenMessagesMutex = portMUX_INITIALIZER_UNLOCKED;
 
 // --- Cache & Peer Management Constants ---
-const unsigned long DEDUP_CACHE_DURATION_MS = 1800000; // 30 minutes (was 10 minutes)
-const size_t MAX_CACHE_SIZE = 100; // Increased from 50
-const unsigned long PEER_LAST_SEEN_DURATION_MS = 600000; // 10 minutes for peer cleanup
-const unsigned long ESP_NOW_PEER_TIMEOUT_MS = 300000; // 5 minutes for ESP-NOW peer cleanup
+const unsigned long DEDUP_CACHE_DURATION_MS = 1800000; // 30 minutes
+const size_t MAX_CACHE_SIZE = 100;
+const unsigned long PEER_LAST_SEEN_DURATION_MS = 600000; // 10 minutes
+const unsigned long ESP_NOW_PEER_TIMEOUT_MS = 300000; // 5 minutes
 
-// Define a struct for messages to be queued from ISR to loop()
-// This struct should contain only raw C-style data to avoid dynamic allocation in ISR
+// Struct for messages queued from ISR to loop()
 typedef struct {
-    esp_now_message_t messageData; // The raw incoming message (already decrypted by onDataRecv)
-    uint8_t senderMac[6];          // MAC of the immediate sender (for peer management)
-    unsigned long timestamp;       // Timestamp of reception
+    esp_now_message_t messageData;
+    uint8_t senderMac[6];
+    unsigned long timestamp;
 } IsrQueueMessage;
 
-// Define a struct for logging security events to NVS from the main loop
+// Struct for logging security events to NVS from the main loop
 typedef struct {
     uint8_t senderMac[6];
     uint32_t messageID;
-    // type can be 0 for hash failure, etc.
-    int type; 
+    int type; // e.g., 0 for hash failure
 } NvsQueueItem;
 
 QueueHandle_t messageQueue;
 QueueHandle_t nvsQueue;
-const size_t QUEUE_SIZE = 10; // Size of the message queue
-const size_t NVS_QUEUE_SIZE = 5; // Size of the NVS logging queue
+const size_t QUEUE_SIZE = 10;
+const size_t NVS_QUEUE_SIZE = 5;
 
-
-// Struct to hold messages for local display, including timestamp for sorting
+// Struct for messages held for local display
 struct LocalDisplayEntry {
-    esp_now_message_t message; // This message will be stored in its decrypted form
-    unsigned long timestamp; // Timestamp when this message was added to localDisplayLog
+    esp_now_message_t message; // Stored in decrypted form
+    unsigned long timestamp;
 };
 std::vector<LocalDisplayEntry> localDisplayLog;
-portMUX_TYPE localDisplayLogMutex = portMUX_INITIALIZER_UNLOCKED; // Corrected initialization
-const size_t MAX_LOCAL_DISPLAY_LOG_SIZE = 50; // Max number of messages to keep in local display log
-const size_t NUM_ORGANIZER_MESSAGES_TO_RETAIN = 5; // Number of most recent organizer messages to always keep
-const size_t MAX_WEB_MESSAGE_INPUT_LENGTH = 214; // Max length for message input in HTML (adjusted for smaller buffer)
-const size_t MAX_POST_BODY_LENGTH = 2048; // Max content length for POST requests
+portMUX_TYPE localDisplayLogMutex = portMUX_INITIALIZER_UNLOCKED;
+const size_t MAX_LOCAL_DISPLAY_LOG_SIZE = 50;
+const size_t NUM_ORGANIZER_MESSAGES_TO_RETAIN = 5;
+const size_t MAX_WEB_MESSAGE_INPUT_LENGTH = 214;
+const size_t MAX_POST_BODY_LENGTH = 2048;
 
-// Map to store MACs of all peers from which messages have been received (for display and peer management)
+// Map to store MACs of all peers for display and management
 std::map<String, unsigned long> lastSeenPeers;
 portMUX_TYPE lastSeenPeersMutex = portMUX_INITIALIZER_UNLOCKED;
 
-// Map for peers added to ESP-NOW for sending (dynamic list)
+// Map for peers added to ESP-NOW for sending
 std::map<String, unsigned long> espNowAddedPeers;
 portMUX_TYPE espNowAddedPeersMutex = portMUX_INITIALIZER_UNLOCKED;
 
 // Set to store unique MACs of clients connected to our Soft AP
 std::set<String> apConnectedClients;
 portMUX_TYPE apClientsMutex = portMUX_INITIALIZER_UNLOCKED;
-
 
 enum DisplayMode {
   MODE_CHAT_LOG,
@@ -270,9 +290,9 @@ DisplayMode currentDisplayMode = MODE_CHAT_LOG;
 
 unsigned long lastTouchTime = 0;
 const unsigned long TOUCH_DEBOUNCE_MS = 500;
-const int TFT_CHAT_LOG_LINES = 22; // Number of lines to display in chat log mode
-const int TFT_URGENT_ONLY_LINES = 22; // Number of lines to display in urgent only mode
-const int MAX_NODES_TO_DISPLAY_TFT = 15; // Max nodes to display on TFT
+const int TFT_CHAT_LOG_LINES = 22;
+const int TFT_URGENT_ONLY_LINES = 22;
+const int MAX_NODES_TO_DISPLAY_TFT = 15;
 
 #if USE_DISPLAY
 void displayChatLogMode(int numLines);
@@ -280,38 +300,6 @@ void displayUrgentOnlyMode(int numLines);
 void displayDeviceInfoMode();
 void displayStatsInfoMode();
 #endif
-
-// A secure SHA-256 hash function with a pseudo-salt.
-String simpleHash(const String& input) {
-    // A hardcoded pseudo-salt. Its purpose is to ensure the hash is unique to this application,
-    // even for common inputs. It is not a per-user salt.
-    const String PSEUDO_SALT = "ProtestNodeSalt123XYZ"; 
-    String saltedInput = input + PSEUDO_SALT;
-
-    // Output buffer for the 32-byte SHA-256 hash
-    unsigned char hashOutput[32];
-    
-    // mbedtls context
-    mbedtls_sha256_context ctx;
-
-    // Perform the hash
-    mbedtls_sha256_init(&ctx);
-    mbedtls_sha256_starts(&ctx, 0); // 0 for SHA-256
-    mbedtls_sha256_update(&ctx, (const unsigned char*)saltedInput.c_str(), saltedInput.length());
-    mbedtls_sha256_finish(&ctx, hashOutput);
-    mbedtls_sha256_free(&ctx);
-
-    // Convert the binary hash to a hex string
-    String hashString = "";
-    for(int i = 0; i < sizeof(hashOutput); i++){
-        char hex[3];
-        sprintf(hex, "%02x", hashOutput[i]);
-        hashString += hex;
-    }
-    
-    return hashString;
-}
-
 
 String formatMac(const uint8_t *mac) {
   char buf[18];
@@ -343,30 +331,23 @@ String escapeHtml(const String& html) {
   return escaped;
 }
 
-// Function to add a message to the local display log
 void addDisplayLog(const String& message) {
     portENTER_CRITICAL(&localDisplayLogMutex);
-    // Create a dummy message structure for the log entry
-    // This is a simplified approach for log messages not directly from ESP-NOW
+    // Create a dummy message structure for local log entries
     esp_now_message_t dummyMsg;
     memset(&dummyMsg, 0, sizeof(dummyMsg));
-    dummyMsg.messageType = MSG_TYPE_UNKNOWN; // Mark as unknown type for simple log messages
-    // Use our own MAC as sender for local log messages
-    memcpy(dummyMsg.originalSenderMac, ourMacBytes, 6); 
-    // Copy the message content
+    dummyMsg.messageType = MSG_TYPE_UNKNOWN;
+    memcpy(dummyMsg.originalSenderMac, ourMacBytes, 6);
     message.toCharArray(dummyMsg.content, MAX_MESSAGE_CONTENT_LEN);
-    dummyMsg.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0'; // Ensure null termination
-    dummyMsg.checksum = calculateChecksum(dummyMsg.content, strlen(dummyMsg.content)); // Calculate checksum for consistency
-
+    dummyMsg.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0';
+    dummyMsg.checksum = calculateChecksum(dummyMsg.content, strlen(dummyMsg.content));
     LocalDisplayEntry newEntry = {dummyMsg, millis()};
     localDisplayLog.push_back(newEntry);
     if (localDisplayLog.size() > MAX_LOCAL_DISPLAY_LOG_SIZE) {
-        // Remove the oldest entry if the log exceeds max size
         localDisplayLog.erase(localDisplayLog.begin());
     }
     portEXIT_CRITICAL(&localDisplayLogMutex);
 }
-
 
 bool isOrganizerSessionValid(const String& token) {
   if (token.length() == 0 || organizerSessionToken.length() == 0) {
@@ -399,29 +380,23 @@ void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_mes
   for (auto& msg : seenMessages) {
     if (msg.messageID == id && memcmp(msg.originalSenderMac, mac, 6) == 0) {
       msg.timestamp = currentTime;
-      // The messageData (including its TTL) should remain as it was when first added to the cache,
-      // which will be MAX_TTL_HOPS. This ensures re-broadcasts use full TTL potential.
       updated = true;
       break;
     }
   }
   if (!updated) {
-    // Remove messages older than DEDUP_CACHE_DURATION_MS first
     seenMessages.erase(std::remove_if(seenMessages.begin(), seenMessages.end(),
                                      [currentTime](const SeenMessage& msg) {
-                                         // *** FIX: DO NOT REMOVE PASSWORD UPDATES FROM CACHE ***
                                          if (msg.messageData.messageType == MSG_TYPE_PASSWORD_UPDATE) {
-                                             return false; // Never remove password updates based on time
+                                             return false;
                                          }
                                          return (currentTime - msg.timestamp) > DEDUP_CACHE_DURATION_MS;
                                      }),
                       seenMessages.end());
 
-    // If cache is still full after removing expired messages, remove the oldest one
     if (seenMessages.size() >= MAX_CACHE_SIZE) {
       auto oldest = std::min_element(seenMessages.begin(), seenMessages.end(),
                                      [](const SeenMessage& a, const SeenMessage& b) {
-                                         // Don't consider password updates as candidates for removal
                                          if (a.messageData.messageType == MSG_TYPE_PASSWORD_UPDATE) return false;
                                          if (b.messageData.messageType == MSG_TYPE_PASSWORD_UPDATE) return true;
                                          return a.timestamp < b.timestamp;
@@ -430,10 +405,17 @@ void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_mes
         seenMessages.erase(oldest);
       }
     }
-    // When a message is *first* added to the cache, ensure its stored TTL is MAX_TTL_HOPS.
-    // This makes the cache a reliable source for re-broadcasting with full TTL potential.
-    esp_now_message_t storedMessage = msgData; // Copy the incoming message data
-    storedMessage.ttl = MAX_TTL_HOPS; // Override TTL to its maximum for storage in cache
+
+    esp_now_message_t storedMessage = msgData;
+    storedMessage.ttl = MAX_TTL_HOPS;
+
+    // Encrypt content with the correct key before storing in cache
+    const uint8_t* keyToUse = PRE_SHARED_KEY;
+    if (useSessionKey && storedMessage.messageType != MSG_TYPE_PASSWORD_UPDATE) {
+        keyToUse = sessionKey;
+    }
+    aesCtrEncrypt((uint8_t*)storedMessage.content, MAX_MESSAGE_CONTENT_LEN, storedMessage.messageID, storedMessage.originalSenderMac, keyToUse);
+
     SeenMessage newMessage = {id, {0}, currentTime, storedMessage};
     memcpy(newMessage.originalSenderMac, mac, 6);
     seenMessages.push_back(newMessage);
@@ -445,55 +427,52 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
   if (len != sizeof(esp_now_message_t)) {
     return;
   }
-  
+
   IsrQueueMessage qMsg;
   memset(&qMsg, 0, sizeof(IsrQueueMessage));
   memcpy(&qMsg.messageData, data, sizeof(esp_now_message_t));
   memcpy(qMsg.senderMac, recvInfo->src_addr, 6);
-  qMsg.timestamp = millis(); // Timestamp when received by ISR
+  qMsg.timestamp = millis();
 
-  // Decrypt the content in ISR before checksum and other checks
-  aesEcbDecrypt((uint8_t*)qMsg.messageData.content, MAX_MESSAGE_CONTENT_LEN);
-  qMsg.messageData.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0'; // Ensure null termination after decryption
+  // Decrypt content using the appropriate key.
+  const uint8_t* keyToUse = PRE_SHARED_KEY;
+  if (useSessionKey && qMsg.messageData.messageType != MSG_TYPE_PASSWORD_UPDATE) {
+      keyToUse = sessionKey;
+  }
+  aesCtrDecrypt((uint8_t*)qMsg.messageData.content, MAX_MESSAGE_CONTENT_LEN, qMsg.messageData.messageID, qMsg.messageData.originalSenderMac, keyToUse);
+  qMsg.messageData.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0';
 
-  // Calculate checksum on the decrypted content in ISR
+  // Calculate checksum on the decrypted content
   uint16_t calculatedChecksum = calculateChecksum(qMsg.messageData.content, strlen(qMsg.messageData.content));
 
-  // Check if the calculated checksum matches the received checksum
   if (calculatedChecksum != qMsg.messageData.checksum) {
-      // Checksum mismatch! Queue for logging in main loop.
+      // Checksum mismatch, queue for logging in main loop.
       NvsQueueItem nvsItem;
       memcpy(nvsItem.senderMac, recvInfo->src_addr, 6);
       nvsItem.messageID = qMsg.messageData.messageID;
       nvsItem.type = 0; // 0 for hash failure
       xQueueSendFromISR(nvsQueue, &nvsItem, 0);
-      return; // Drop the message if checksum verification fails
+      return; // Drop the message
   }
 
-  // If message has no TTL left upon arrival, discard it.
   if (qMsg.messageData.ttl == 0) {
       return;
   }
 
-  // Queue the message for further processing in the main loop
-  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+  // Queue the message for processing in the main loop
   if (xQueueSendFromISR(messageQueue, &qMsg, 0) != pdPASS) {
     // Message dropped due to queue full
   }
-  if (xHigherPriorityTaskWoken == pdTRUE) {
-    portYIELD_FROM_ISR();
-  }
 }
 
-// sendToAllPeers now takes a message by reference so its TTL can be decremented directly
-void sendToAllPeers(esp_now_message_t& message) { // Changed to pass by reference
+void sendToAllPeers(esp_now_message_t& message) {
   uint8_t currentMacBytes[6];
   memcpy(currentMacBytes, ourMacBytes, 6);
 
   if (message.ttl > 0) {
-      message.ttl--; // Decrement TTL here, as this is the point of sending (one hop)
+      message.ttl--; // Decrement TTL for this hop
   } else {
-      Serial.println("Attempted to re-broadcast message with TTL 0. Skipping.");
+      if(VERBOSE_MODE) Serial.println("Attempted to re-broadcast message with TTL 0. Skipping.");
       return;
   }
 
@@ -505,93 +484,80 @@ void sendToAllPeers(esp_now_message_t& message) { // Changed to pass by referenc
            &tempMac[0], &tempMac[1], &tempMac[2], &tempMac[3], &tempMac[4], &tempMac[5]);
     for (int k = 0; k < 6; ++k) { peerMacBytes[k] = (uint8_t)tempMac[k]; }
 
-    // Only send to peers that are NOT our own MAC and NOT the original sender of this message
+    // Only send to peers that are NOT our own MAC and NOT the original sender
     if (memcmp(peerMacBytes, currentMacBytes, 6) != 0 && memcmp(peerMacBytes, message.originalSenderMac, 6) != 0) {
-      // The message content is already encrypted when it reaches here.
       esp_now_send(peerMacBytes, (uint8_t*)&message, sizeof(esp_now_message_t));
     }
   }
   portEXIT_CRITICAL(&espNowAddedPeersMutex);
 }
 
-// Helper function to create and send an ESP-NOW message (plaintext)
 void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len, uint8_t type, const uint8_t* targetMac = nullptr) {
-  // --- Start of capability check ---
-  // Node can send Organizer/Public messages if a non-default password has been set (passwordChangeLocked is true)
+  // Node can send Organizer/Public messages only if a non-default password has been set.
   if ((type == MSG_TYPE_ORGANIZER || type == MSG_TYPE_PUBLIC) && !passwordChangeLocked) {
-    Serial.println("Node not capable of sending this message type (password not set). Skipping send.");
+    if(VERBOSE_MODE) Serial.println("Node not capable of sending this message type (password not set). Skipping send.");
     webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Node not configured to send this message. Set an organizer password first.</p>";
-    return; 
+    return;
   }
-  // --- End of capability check ---
 
   esp_now_message_t newMessage;
   memset(&newMessage, 0, sizeof(newMessage));
-  newMessage.messageID = esp_random(); // Use esp_random for message ID
+  newMessage.messageID = esp_random();
   memcpy(newMessage.originalSenderMac, ourMacBytes, 6);
-  newMessage.ttl = MAX_TTL_HOPS; // Set initial TTL
-  newMessage.messageType = type; // Set the message type
+  newMessage.ttl = MAX_TTL_HOPS;
+  newMessage.messageType = type;
 
-  // Copy plaintext data, ensuring null termination and max length
   size_t len_to_copy = std::min(plaintext_data_len, (size_t)MAX_MESSAGE_CONTENT_LEN - 1);
   strncpy(newMessage.content, plaintext_data, len_to_copy);
-  newMessage.content[len_to_copy] = '\0'; // Ensure null termination for plaintext
+  newMessage.content[len_to_copy] = '\0';
 
   // Calculate checksum on plaintext content BEFORE encryption
   newMessage.checksum = calculateChecksum(newMessage.content, strlen(newMessage.content));
 
-  // Encrypt the message content before sending
-  aesEcbEncrypt((uint8_t*)newMessage.content, MAX_MESSAGE_CONTENT_LEN);
+  // Encrypt with the appropriate key based on message type
+  const uint8_t* keyToUse = PRE_SHARED_KEY; // Default to factory key
+  if (useSessionKey && type != MSG_TYPE_PASSWORD_UPDATE) {
+      keyToUse = sessionKey;
+  }
+  aesCtrEncrypt((uint8_t*)newMessage.content, MAX_MESSAGE_CONTENT_LEN, newMessage.messageID, newMessage.originalSenderMac, keyToUse);
 
   if (targetMac != nullptr) {
-      // Unicast message
       esp_now_send(targetMac, (uint8_t*)&newMessage, sizeof(esp_now_message_t));
-      Serial.printf("Sent unicast message (Type: %d, ID: %u) to %02X:%02X:%02X:%02X:%02X:%02X\n",
+      if(VERBOSE_MODE) Serial.printf("Sent unicast message (Type: %d, ID: %u) to %02X:%02X:%02X:%02X:%02X:%02X\n",
                     type, newMessage.messageID, targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5]);
   } else {
-      // Broadcast message (sendToAllPeers will decrement TTL on 'newMessage' directly)
       sendToAllPeers(newMessage);
   }
   totalMessagesSent++;
 
-  // Special handling for discovery messages: DO NOT add to cache or local display log
-  // Password updates (MSG_TYPE_PASSWORD_UPDATE) are intended to be cached.
-  // Status requests/responses should also not be added to display log
-  if (type == MSG_TYPE_DISCOVERY || type == MSG_TYPE_STATUS_REQUEST || type == MSG_TYPE_STATUS_RESPONSE || type == MSG_TYPE_JAMMING_ALERT) { 
-      return; // Do not proceed further for these message types
+  // System messages are not cached or added to the local display log
+  if (type == MSG_TYPE_DISCOVERY || type == MSG_TYPE_STATUS_REQUEST || type == MSG_TYPE_STATUS_RESPONSE || type == MSG_TYPE_JAMMING_ALERT) {
+      return;
   }
 
-  // Add to seen messages (newMessage now has its decremented TTL)
-  // addOrUpdateMessageToSeen will store the message with MAX_TTL_HOPS
-  // when it's first seen, regardless of its incoming TTL.
   addOrUpdateMessageToSeen(newMessage.messageID, newMessage.originalSenderMac, newMessage);
 
-  // Add to local display log IMMEDIATELY for originating node
+  // Add to local display log immediately for originating node
   portENTER_CRITICAL(&localDisplayLogMutex);
-  // Decrypt for local display immediately after sending
-  // Create a copy to decrypt for local display without altering the 'newMessage' that was sent.
   esp_now_message_t displayMessage = newMessage;
-  // The checksum is already part of displayMessage, no need to recalculate for display.
-  aesEcbDecrypt((uint8_t*)displayMessage.content, MAX_MESSAGE_CONTENT_LEN); // Decrypt for display
-  displayMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0'; // Ensure null termination
-  LocalDisplayEntry newEntry = {displayMessage, millis()}; // Store message and its creation timestamp
+  aesCtrDecrypt((uint8_t*)displayMessage.content, MAX_MESSAGE_CONTENT_LEN, displayMessage.messageID, displayMessage.originalSenderMac, keyToUse);
+  displayMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0';
+  LocalDisplayEntry newEntry = {displayMessage, millis()};
   localDisplayLog.push_back(newEntry);
   portEXIT_CRITICAL(&localDisplayLogMutex);
 
-  Serial.println("Sending (Plaintext): " + String(plaintext_data));
+  if(VERBOSE_MODE) Serial.println("Sending (Plaintext): " + String(plaintext_data));
 }
 
-// Function to manage the local display log, ensuring organizer message retention and newest-first order
 void manageLocalDisplayLog() {
     portENTER_CRITICAL(&localDisplayLogMutex);
-
     // 1. Sort the entire log by timestamp, newest first
     std::sort(localDisplayLog.begin(), localDisplayLog.end(), [](const LocalDisplayEntry& a, const LocalDisplayEntry& b) {
-        return a.timestamp > b.timestamp; // Newest first
+        return a.timestamp > b.timestamp;
     });
 
     std::vector<LocalDisplayEntry> newLocalDisplayLog;
-    std::set<std::pair<uint32_t, String>> addedMessageKeys; // To track unique messages by ID and MAC suffix
+    std::set<std::pair<uint32_t, String>> addedMessageKeys;
 
     // 2. Add the most recent organizer messages first
     int organizerCount = 0;
@@ -605,25 +571,21 @@ void manageLocalDisplayLog() {
         }
     }
 
-    // 3. Add other messages (and any remaining organizer messages not yet added)
-    //    until MAX_LOCAL_DISPLAY_LOG_SIZE is reached.
+    // 3. Add other messages until MAX_LOCAL_DISPLAY_LOG_SIZE is reached.
     for (const auto& entry : localDisplayLog) {
         if (newLocalDisplayLog.size() >= MAX_LOCAL_DISPLAY_LOG_SIZE) {
-            break; // Max size reached
+            break;
         }
-
-        // Check if this message has already been added (either as a retained organizer or previously)
         if (addedMessageKeys.find({entry.message.messageID, getMacSuffix(entry.message.originalSenderMac)}) == addedMessageKeys.end()) {
             newLocalDisplayLog.push_back(entry);
             addedMessageKeys.insert({entry.message.messageID, getMacSuffix(entry.message.originalSenderMac)});
         }
     }
-
     localDisplayLog = newLocalDisplayLog;
     portEXIT_CRITICAL(&localDisplayLogMutex);
 }
 
-// WiFi event handler function to track unique client connections to the AP
+// WiFi event handler to track unique client connections to the AP
 void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     if (event == ARDUINO_EVENT_WIFI_AP_STACONNECTED) {
         char macStr[18];
@@ -634,8 +596,10 @@ void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
         portENTER_CRITICAL(&apClientsMutex);
         apConnectedClients.insert(String(macStr));
         portEXIT_CRITICAL(&apClientsMutex);
-        Serial.printf("Station connected to AP: %s\n", macStr);
-        Serial.printf("Total unique clients: %d\n", apConnectedClients.size());
+        if(VERBOSE_MODE) {
+            Serial.printf("Station connected to AP: %s\n", macStr);
+            Serial.printf("Total unique clients: %d\n", apConnectedClients.size());
+        }
     }
 }
 
@@ -644,10 +608,10 @@ void setup() {
   randomSeed(analogRead(0));
 
   publicMessagingEnabled = false;
-  publicMessagingLocked = false; // Initialize public messaging lock status as unlocked
-  passwordChangeLocked = false; // Initialize password change lock status (node not capable)
-  isOrganizerSessionActive = false; // Initialize web session as inactive
-  lastMessageReceivedTimestamp = millis(); // Initialize to prevent false positive on boot
+  publicMessagingLocked = false;
+  passwordChangeLocked = false;
+  isOrganizerSessionActive = false;
+  lastMessageReceivedTimestamp = millis();
 
   messageQueue = xQueueCreate(QUEUE_SIZE, sizeof(IsrQueueMessage));
   if (messageQueue == NULL) {
@@ -661,19 +625,18 @@ void setup() {
     while(true) { delay(100); }
   }
 
-  // Initialize preferences and load persisted security data
-  preferences.begin("protest-node", false); // false = read/write mode
+  preferences.begin("protest-node", false); // false = read/write mode for security logs
   jammingIncidentCount = preferences.getUInt("jamCount", 0);
   hashFailureCount = preferences.getUInt("hashFailCount", 0);
-  Serial.printf("Loaded from NVS -> Jamming Incidents: %u, Hash Failures: %u\n", jammingIncidentCount, hashFailureCount);
+  infiltrationIncidentCount = preferences.getUInt("infilCount", 0);
+  if (VERBOSE_MODE) Serial.printf("Loaded from NVS -> Jamming: %u, Hash Failures: %u, Infiltration Attempts: %u\n", jammingIncidentCount, hashFailureCount, infiltrationIncidentCount);
 
-  // Calculate the hash of the WEB_PASSWORD at startup using the simple hash
+  // The node will always start without a session key.
+  // Set the initial web UI password to the default value. This is ONLY for login.
   hashedOrganizerPassword = simpleHash(WEB_PASSWORD);
 
   WiFi.mode(WIFI_AP_STA);
   WiFi.setSleep(false);
-  
-  // Register WiFi event handler BEFORE starting AP
   WiFi.onEvent(WiFiEvent);
 
   WiFi.softAP("placeholder", nullptr, WIFI_CHANNEL);
@@ -709,7 +672,7 @@ void setup() {
   displayActive = true;
   Serial.println("Display initialized");
   pinMode(TFT_TOUCH_IRQ_PIN, INPUT_PULLUP);
-  Serial.printf("T_IRQ pin set to INPUT_PULLUP on GPIO%d\n", TFT_TOUCH_IRQ_PIN);
+  if(VERBOSE_MODE) Serial.printf("T_IRQ pin set to INPUT_PULLUP on GPIO%d\n", TFT_TOUCH_IRQ_PIN);
   displayChatLogMode(TFT_CHAT_LOG_LINES);
 #endif
 
@@ -718,36 +681,32 @@ void setup() {
     while(true) { delay(100); }
   }
 
-  // Add the broadcast MAC address as an initial peer for discovery messages
   uint8_t broadcastMac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
   esp_now_peer_info_t peer{};
   memcpy(peer.peer_addr, broadcastMac, 6);
   peer.channel = WIFI_CHANNEL;
-  peer.encrypt = false; // Custom encryption
+  peer.encrypt = false;
   esp_now_add_peer(&peer);
-  
+
   portENTER_CRITICAL(&espNowAddedPeersMutex);
-  espNowAddedPeers[formatMac(broadcastMac)] = millis(); // Add broadcast MAC to our dynamic peer list
+  espNowAddedPeers[formatMac(broadcastMac)] = millis();
   portEXIT_CRITICAL(&espNowAddedPeersMutex);
 
   esp_now_register_recv_cb(onDataRecv);
 
-  // Initial auto-message
   char msgContentBuf[MAX_MESSAGE_CONTENT_LEN];
   snprintf(msgContentBuf, sizeof(msgContentBuf), "Node %s initializing", MAC_suffix_str.c_str());
   createAndSendMessage(msgContentBuf, strlen(msgContentBuf), MSG_TYPE_AUTO_INIT);
 
-  // Initial discovery broadcast
   createAndSendMessage(MAC_full_str.c_str(), MAC_full_str.length(), MSG_TYPE_DISCOVERY);
   lastDiscoveryBroadcast = millis();
 
   lastRebroadcast = millis();
-  lastLocalDisplayLogManage = millis(); // Initialize the timer for display log management
-  lastSeenPeersManage = millis(); // Initialize the timer for last seen peers management
+  lastLocalDisplayLogManage = millis();
+  lastSeenPeersManage = millis();
 }
 
-// Helper to build query string for redirects
-String buildQueryString(const String& sessionToken, bool showPublic, bool showUrgent) {
+String buildQueryString(const String& sessionToken, bool showPublic, bool showUrgent, bool hideSystem) {
     String query = "";
     if (sessionToken.length() > 0) {
         query += "session_token=" + sessionToken;
@@ -759,6 +718,10 @@ String buildQueryString(const String& sessionToken, bool showPublic, bool showUr
     if (showUrgent) {
         if (query.length() > 0) query += "&";
         query += "show_urgent=true";
+    }
+    if (hideSystem) {
+        if (query.length() > 0) query += "&";
+        query += "hide_system=true";
     }
     return query;
 }
@@ -772,253 +735,244 @@ void loop() {
       if (nvsItem.type == 0) { // Hash failure
           hashFailureCount++;
           preferences.putUInt("hashFailCount", hashFailureCount);
-
-          // Get the current index for the circular log buffer in NVS
           uint8_t failLogIndex = preferences.getUChar("failLogIdx", 0);
-          
-          // Format the log entry string
           String logData = formatMac(nvsItem.senderMac) + " | ID: " + String(nvsItem.messageID);
           String key = "failMsg" + String(failLogIndex);
-          
-          // Store the log entry
           preferences.putString(key.c_str(), logData);
-          
-          // Increment and wrap the index for the next entry
           failLogIndex = (failLogIndex + 1) % MAX_FAIL_LOG_ENTRIES;
           preferences.putUChar("failLogIdx", failLogIndex);
-          
-          Serial.printf("Logged hash failure from %s. Total failures: %u\n", formatMac(nvsItem.senderMac).c_str(), hashFailureCount);
+          if(VERBOSE_MODE) Serial.printf("Logged hash failure from %s. Total failures: %u\n", formatMac(nvsItem.senderMac).c_str(), hashFailureCount);
       }
   }
 
-
   IsrQueueMessage qMsg;
-  bool messageProcessed = false;
   while (xQueueReceive(messageQueue, &qMsg, 0) == pdPASS) {
-    // A valid message was received. Update timestamp and check if jamming has stopped.
     lastMessageReceivedTimestamp = millis();
     if (isCurrentlyJammed) {
-        isCurrentlyJammed = false; // Communication restored
-        communicationRestoredTimestamp = millis(); // Start timer to reset long-term memory
-        Serial.println("Communication restored. Jamming appears to have stopped.");
+        isCurrentlyJammed = false;
+        communicationRestoredTimestamp = millis();
+        if(VERBOSE_MODE) Serial.println("Communication restored. Jamming appears to have stopped.");
         addDisplayLog("Communication restored.");
     }
-    
-    // Process the message received from the ISR queue
-    esp_now_message_t incomingMessage = qMsg.messageData; // Copy data from queue struct
-    uint8_t* recvInfoSrcAddr = qMsg.senderMac; // Get sender MAC from queue struct
-    unsigned long receptionTimestamp = qMsg.timestamp; // Get timestamp from queue struct
 
+    esp_now_message_t incomingMessage = qMsg.messageData;
+    uint8_t* recvInfoSrcAddr = qMsg.senderMac;
+    unsigned long receptionTimestamp = qMsg.timestamp;
     String incomingContent = String(incomingMessage.content);
     String originalSenderMacSuffix = getMacSuffix(incomingMessage.originalSenderMac);
 
-    // Update lastSeenPeers with the MAC of the immediate sender (for display on web/TFT)
     portENTER_CRITICAL(&lastSeenPeersMutex);
-    lastSeenPeers[formatMac(recvInfoSrcAddr)] = receptionTimestamp; // Use the timestamp from ISR
+    lastSeenPeers[formatMac(recvInfoSrcAddr)] = receptionTimestamp;
     portEXIT_CRITICAL(&lastSeenPeersMutex);
 
-    // Add/Update peer in espNowAddedPeers for sending (dynamic peer management)
     String senderMacStr = formatMac(recvInfoSrcAddr);
-    portENTER_CRITICAL(&espNowAddedPeersMutex);
-    bool peerExistsInMap = espNowAddedPeers.count(senderMacStr) > 0;
-    portEXIT_CRITICAL(&espNowAddedPeersMutex);
-
     esp_now_peer_info_t peer{};
     memcpy(peer.peer_addr, recvInfoSrcAddr, 6);
     peer.channel = WIFI_CHANNEL;
-    peer.encrypt = false; // Custom encryption
+    peer.encrypt = false;
 
     esp_err_t addPeerResult = esp_now_add_peer(&peer);
     if (addPeerResult == ESP_OK || addPeerResult == ESP_ERR_ESPNOW_EXIST) {
       portENTER_CRITICAL(&espNowAddedPeersMutex);
-      espNowAddedPeers[senderMacStr] = millis(); // Update timestamp (current millis for sending peers)
+      espNowAddedPeers[senderMacStr] = millis();
       portEXIT_CRITICAL(&espNowAddedPeersMutex);
     } else {
-      Serial.printf("Failed to add peer %s: %d\n", senderMacStr.c_str(), addPeerResult);
+      if(VERBOSE_MODE) Serial.printf("Failed to add peer %s: %d\n", senderMacStr.c_str(), addPeerResult);
     }
 
-    // Handle MSG_TYPE_DISCOVERY differently: Do not display, cache, or re-broadcast
     if (incomingMessage.messageType == MSG_TYPE_DISCOVERY) {
-        continue; // Stop processing this message further (silently handled)
+        continue;
     }
 
-    // Handle MSG_TYPE_JAMMING_ALERT: Update status, cache it, but don't display or re-broadcast
     if (incomingMessage.messageType == MSG_TYPE_JAMMING_ALERT) {
-        if (lastJammingEventTimestamp == 0) { // If we haven't detected it ourselves yet
-            Serial.println("Received JAMMING_ALERT from a peer. Updating local status.");
-            lastJammingEventTimestamp = millis(); // Set our long-term memory
-            // Log this as a new incident if received from a peer
+        if (lastJammingEventTimestamp == 0) {
+            if(VERBOSE_MODE) Serial.println("Received JAMMING_ALERT from a peer. Updating local status.");
+            lastJammingEventTimestamp = millis();
             jammingIncidentCount++;
             preferences.putUInt("jamCount", jammingIncidentCount);
         }
-        // Re-encrypt before caching to ensure it's stored correctly
         esp_now_message_t encryptedForCache = incomingMessage;
-        aesEcbEncrypt((uint8_t*)encryptedForCache.content, MAX_MESSAGE_CONTENT_LEN);
+        const uint8_t* keyToUse = useSessionKey ? sessionKey : PRE_SHARED_KEY;
+        aesCtrEncrypt((uint8_t*)encryptedForCache.content, MAX_MESSAGE_CONTENT_LEN, encryptedForCache.messageID, encryptedForCache.originalSenderMac, keyToUse);
         addOrUpdateMessageToSeen(encryptedForCache.messageID, encryptedForCache.originalSenderMac, encryptedForCache);
-        continue; // Stop further processing of this alert message
+        continue;
     }
 
-
-    // Check if the message has been seen before by THIS node (for display deduplication).
     bool wasAlreadySeen = isMessageSeen(incomingMessage.messageID, incomingMessage.originalSenderMac);
+    bool skipDisplayLog = false;
 
-    bool skipDisplayLog = false; // Flag to control display logging
-
-    // Handle MSG_TYPE_STATUS_REQUEST
     if (incomingMessage.messageType == MSG_TYPE_STATUS_REQUEST) {
-        Serial.printf("Received STATUS_REQUEST from %02X:%02X:%02X:%02X:%02X:%02X. Replying with status.\n", recvInfoSrcAddr[0], recvInfoSrcAddr[1], recvInfoSrcAddr[2], recvInfoSrcAddr[3], recvInfoSrcAddr[4], recvInfoSrcAddr[5]);
-        
+        if(VERBOSE_MODE) Serial.printf("Received STATUS_REQUEST from %02X:%02X:%02X:%02X:%02X:%02X. Replying with status.\n", recvInfoSrcAddr[0], recvInfoSrcAddr[1], recvInfoSrcAddr[2], recvInfoSrcAddr[3], recvInfoSrcAddr[4], recvInfoSrcAddr[5]);
         char responseContent[3];
         responseContent[0] = publicMessagingEnabled ? '1' : '0';
         responseContent[1] = publicMessagingLocked ? '1' : '0';
         responseContent[2] = '\0';
-        
         createAndSendMessage(responseContent, strlen(responseContent), MSG_TYPE_STATUS_RESPONSE, incomingMessage.originalSenderMac);
-        Serial.printf("Sent STATUS_RESPONSE (publicEnabled=%s, publicLocked=%s) to %02X:%02X:%02X:%02X:%02X:%02X\n",
+        if(VERBOSE_MODE) Serial.printf("Sent STATUS_RESPONSE (publicEnabled=%s, publicLocked=%s) to %02X:%02X:%02X:%02X:%02X:%02X\n",
                       publicMessagingEnabled ? "true" : "false", publicMessagingLocked ? "true" : "false", incomingMessage.originalSenderMac[0], incomingMessage.originalSenderMac[1], incomingMessage.originalSenderMac[2], incomingMessage.originalSenderMac[3], incomingMessage.originalSenderMac[4], incomingMessage.originalSenderMac[5]);
-        continue; // Do not process this message further (no display, no re-broadcast)
+        continue;
     }
 
-    // Handle MSG_TYPE_STATUS_RESPONSE
     if (incomingMessage.messageType == MSG_TYPE_STATUS_RESPONSE) {
-        bool peerPublicStatus = (incomingMessage.content[0] == '1'); // Content is '1' or '0'
-        bool peerPublicLockedStatus = (incomingMessage.content[1] == '1'); // Content is '1' or '0'
-        Serial.printf("Received STATUS_RESPONSE from %02X:%02X:%02X:%02X:%02X:%02X. Peer Public Enabled: %s, Peer Public Locked: %s\n",
+        bool peerPublicStatus = (incomingMessage.content[0] == '1');
+        bool peerPublicLockedStatus = (incomingMessage.content[1] == '1');
+        if(VERBOSE_MODE) Serial.printf("Received STATUS_RESPONSE from %02X:%02X:%02X:%02X:%02X:%02X. Peer Public Enabled: %s, Peer Public Locked: %s\n",
                       incomingMessage.originalSenderMac[0], incomingMessage.originalSenderMac[1], incomingMessage.originalSenderMac[2], incomingMessage.originalSenderMac[3], incomingMessage.originalSenderMac[4], incomingMessage.originalSenderMac[5], peerPublicStatus ? "true" : "false", peerPublicLockedStatus ? "true" : "false");
         addDisplayLog(String("Peer ") + getMacSuffix(incomingMessage.originalSenderMac) + " Public Status: " + (peerPublicStatus ? "ENABLED" : "DISABLED") + ", Locked: " + (peerPublicLockedStatus ? "YES" : "NO"));
-        // Match the public messaging status to the sender's status
-        // Only update if our current status is different and not locked
-        if (!publicMessagingLocked) { // Only update if we are not locally locked
-            publicMessagingEnabled = peerPublicStatus; 
-            Serial.printf("Local publicMessagingEnabled set to: %s (from peer status)\n", publicMessagingEnabled ? "true" : "false");
+        if (!publicMessagingLocked) {
+            publicMessagingEnabled = peerPublicStatus;
+            if(VERBOSE_MODE) Serial.printf("Local publicMessagingEnabled set to: %s (from peer status)\n", publicMessagingEnabled ? "true" : "false");
         }
-        // If the peer is locked, and we are not, we should also lock
         if (peerPublicLockedStatus && !publicMessagingLocked) {
             publicMessagingLocked = true;
-            publicMessagingEnabled = false; // If locked, it must be disabled
-            Serial.println("Local publicMessagingLocked set to TRUE (from peer status). Public messaging DISABLED.");
+            publicMessagingEnabled = false;
+            if(VERBOSE_MODE) Serial.println("Local publicMessagingLocked set to TRUE (from peer status). Public messaging DISABLED.");
         }
-        continue; // Do not process this message further (no re-broadcast)
+        continue;
     }
 
-    // Handle MSG_TYPE_PASSWORD_UPDATE
     if (incomingMessage.messageType == MSG_TYPE_PASSWORD_UPDATE) {
-        // If password is already set on this node, ignore the incoming update completely.
-        // This prevents processing AND caching of redundant/unwanted password updates.
-        if (passwordChangeLocked) {
-            Serial.println("Received password update but local password change is locked. Ignoring and not caching.");
-            continue; // Stop processing this message, including not adding to cache or display log.
-        }
-        // ONLY process password updates if new to this node (passwordChangeLocked is already false here)
-        if (!wasAlreadySeen) { 
-            Serial.println("Received password update command via mesh.");
-            // The content is the plaintext new password (decrypted by onDataRecv already)
-            hashedOrganizerPassword = simpleHash(String(incomingMessage.content));
-            passwordChangeLocked = true; // Lock change on this board (node is now capable)
-            Serial.println("Organizer password updated via mesh. Local change locked. Node is now capable of sending messages.");
+        // --- START: Infiltration Detection Logic ---
+        String newPasswordHash = simpleHash(String(incomingMessage.content));
+        unsigned long currentTime = millis();
 
-            // If a node receives an OTA password update and accepts it,
-            // it immediately requests the sender's public status.
-            Serial.printf("Password updated via OTA. Requesting public status from sender %02X:%02X:%02X:%02X:%02X:%02X\n", incomingMessage.originalSenderMac[0], incomingMessage.originalSenderMac[1], incomingMessage.originalSenderMac[2], incomingMessage.originalSenderMac[3], incomingMessage.originalSenderMac[4], incomingMessage.originalSenderMac[5]);
-            createAndSendMessage("", 0, MSG_TYPE_STATUS_REQUEST, incomingMessage.originalSenderMac); // Send unicast status request
+        portENTER_CRITICAL(&passwordUpdateHistoryMutex);
+        // 1. Prune old entries from history
+        passwordUpdateHistory.erase(std::remove_if(passwordUpdateHistory.begin(), passwordUpdateHistory.end(),
+            [currentTime](const PasswordUpdateEvent& event) {
+                return (currentTime - event.timestamp) > INFILTRATION_WINDOW_MS;
+            }), passwordUpdateHistory.end());
+
+        // 2. Add the new event
+        PasswordUpdateEvent newEvent;
+        newEvent.timestamp = currentTime;
+        newEvent.passwordHash = newPasswordHash;
+        memcpy(newEvent.senderMac, incomingMessage.originalSenderMac, 6);
+        passwordUpdateHistory.push_back(newEvent);
+
+        // 3. Check for conflicting passwords
+        std::set<String> uniqueHashesInWindow;
+        for (const auto& event : passwordUpdateHistory) {
+            uniqueHashesInWindow.insert(event.passwordHash);
         }
-        skipDisplayLog = true; // Always skip display for password updates
+        portEXIT_CRITICAL(&passwordUpdateHistoryMutex);
+
+        if (uniqueHashesInWindow.size() > INFILTRATION_THRESHOLD) {
+            if (!isInfiltrationAlert) {
+                if(VERBOSE_MODE) Serial.println("INFILTRATION ATTEMPT DETECTED: Multiple conflicting passwords received in a short period.");
+                isInfiltrationAlert = true;
+                lastInfiltrationEventTimestamp = millis();
+                infiltrationIncidentCount++;
+                preferences.putUInt("infilCount", infiltrationIncidentCount);
+
+                // Log the MAC of the sender that triggered the alert
+                uint8_t infilLogIndex = preferences.getUChar("infilLogIdx", 0);
+                String logData = formatMac(incomingMessage.originalSenderMac);
+                String key = "infilMsg" + String(infilLogIndex);
+                preferences.putString(key.c_str(), logData);
+                infilLogIndex = (infilLogIndex + 1) % MAX_INFIL_LOG_ENTRIES;
+                preferences.putUChar("infilLogIdx", infilLogIndex);
+                if (VERBOSE_MODE) Serial.printf("Logged infiltration attempt from %s. Total attempts: %u\n", formatMac(incomingMessage.originalSenderMac).c_str(), infiltrationIncidentCount);
+
+                addDisplayLog("Infiltration Alert!");
+            }
+        }
+        // --- END: Infiltration Detection Logic ---
+
+        // MODIFICATION: Block password changes if already set, but after logging infiltration attempt.
+        if (passwordChangeLocked) {
+            if(VERBOSE_MODE) Serial.println("Received password update but local password is locked. Ignoring update.");
+            continue; // Drop the message from further processing (no key change, no caching, no rebroadcast).
+        }
+
+        if (!wasAlreadySeen) {
+            if(VERBOSE_MODE) Serial.println("Received password update command via mesh.");
+            deriveAndSetSessionKey(String(incomingMessage.content));
+            if(VERBOSE_MODE) {
+              Serial.println("Organizer password updated via mesh. Node is now capable of sending messages.");
+              Serial.printf("Password updated via OTA. Requesting public status from sender %02X:%02X:%02X:%02X:%02X:%02X\n", incomingMessage.originalSenderMac[0], incomingMessage.originalSenderMac[1], incomingMessage.originalSenderMac[2], incomingMessage.originalSenderMac[3], incomingMessage.originalSenderMac[4], incomingMessage.originalSenderMac[5]);
+            }
+            createAndSendMessage("", 0, MSG_TYPE_STATUS_REQUEST, incomingMessage.originalSenderMac);
+        }
+        skipDisplayLog = true;
     }
 
-    // Always update the seen message cache first. This ensures the message's timestamp
-    // is refreshed and its "full TTL potential" version is stored if new.
-    // To do this, we re-encrypt the incomingMessage before passing it to the cache.
-    // NOTE: incomingMessage.content is currently DECRYPTED here.
-    esp_now_message_t encryptedForCache = incomingMessage; // Create a copy
-    aesEcbEncrypt((uint8_t*)encryptedForCache.content, MAX_MESSAGE_CONTENT_LEN); // Re-encrypt for cache
+    esp_now_message_t encryptedForCache = incomingMessage;
+    const uint8_t* keyToUseForCache = PRE_SHARED_KEY;
+    if(useSessionKey && encryptedForCache.messageType != MSG_TYPE_PASSWORD_UPDATE) {
+        keyToUseForCache = sessionKey;
+    }
+    aesCtrEncrypt((uint8_t*)encryptedForCache.content, MAX_MESSAGE_CONTENT_LEN, encryptedForCache.messageID, encryptedForCache.originalSenderMac, keyToUseForCache);
     addOrUpdateMessageToSeen(encryptedForCache.messageID, encryptedForCache.originalSenderMac, encryptedForCache);
 
-
-    // ONLY queue the message for local processing/display if it's truly new to this node.
-    // If `wasAlreadySeen` is true, it means this node has already processed it for display
-    // or originated it. The re-broadcast logic is handled separately by the cache.
     if (!wasAlreadySeen) {
         totalMessagesReceived++;
-        // The urgent message count is based on the content prefix, not message type directly
         if (String(incomingMessage.content).indexOf("Urgent: ") != -1) {
             totalUrgentMessages++;
         }
-
-        // Add to local display log (decrypted version) - ONLY if not a password update
-        if (!skipDisplayLog) { // Check the flag here
+        if (!skipDisplayLog) {
             portENTER_CRITICAL(&localDisplayLogMutex);
-            LocalDisplayEntry newEntry = {incomingMessage, millis()}; // Store message and its reception timestamp
+            LocalDisplayEntry newEntry = {incomingMessage, millis()};
             localDisplayLog.push_back(newEntry);
             portEXIT_CRITICAL(&localDisplayLogMutex);
         }
-
-        // IMPORTANT: When re-broadcasting from the queue, we need to send the *encrypted* version.
-        // The message in `incomingMessage` is currently decrypted.
-        // We also need to respect its current TTL.
         if (incomingMessage.ttl > 0) {
-            esp_now_message_t encryptedForRebroadcast = incomingMessage; // Create a copy
-            aesEcbEncrypt((uint8_t*)encryptedForRebroadcast.content, MAX_MESSAGE_CONTENT_LEN); // Encrypt for re-broadcast
+            esp_now_message_t encryptedForRebroadcast = incomingMessage;
+            const uint8_t* keyToUseForRebroadcast = PRE_SHARED_KEY;
+            if(useSessionKey && encryptedForRebroadcast.messageType != MSG_TYPE_PASSWORD_UPDATE) {
+                keyToUseForRebroadcast = sessionKey;
+            }
+            aesCtrEncrypt((uint8_t*)encryptedForRebroadcast.content, MAX_MESSAGE_CONTENT_LEN, encryptedForRebroadcast.messageID, encryptedForRebroadcast.originalSenderMac, keyToUseForRebroadcast);
             sendToAllPeers(encryptedForRebroadcast);
         } else {
-            Serial.println("Message reached TTL limit, not re-broadcasting.");
+            if(VERBOSE_MODE) Serial.println("Message reached TTL limit, not re-broadcasting.");
         }
     }
-    
-    // Command processing (safe in loop after decryption)
+
     if (incomingMessage.messageType == MSG_TYPE_COMMAND) {
         if (incomingContent.equals(CMD_PUBLIC_ON)) {
-            // Only enable public messaging if it's not locked
             if (!publicMessagingLocked) {
                 if (!publicMessagingEnabled) {
                     publicMessagingEnabled = true;
-                    Serial.println("Received command: ENABLE public messaging.");
+                    if(VERBOSE_MODE) Serial.println("Received command: ENABLE public messaging.");
                     webFeedbackMessage = "<p class='feedback' style='color:blue;'>Public messaging was ENABLED by an organizer.</p>";
                 }
             } else {
-                Serial.println("Received command: ENABLE public messaging, but it is locked OFF. Ignoring.");
+                if(VERBOSE_MODE) Serial.println("Received command: ENABLE public messaging, but it is locked OFF. Ignoring.");
                 webFeedbackMessage = "<p class='feedback' style='color:orange;'>Public messaging is locked OFF by a previous organizer command. Cannot re-enable.</p>";
             }
         } else if (incomingContent.equals(CMD_PUBLIC_OFF)) {
-            if (publicMessagingEnabled || !publicMessagingLocked) { // If it's currently enabled, or not yet locked
-                publicMessagingEnabled = false; // Disable it
-                publicMessagingLocked = true;   // Lock it permanently (until reboot)
-                Serial.println("Received command: DISABLE public messaging. Status is now LOCKED OFF.");
+            if (publicMessagingEnabled || !publicMessagingLocked) {
+                publicMessagingEnabled = false;
+                publicMessagingLocked = true;
+                if(VERBOSE_MODE) Serial.println("Received command: DISABLE public messaging. Status is now LOCKED OFF.");
                 webFeedbackMessage = "<p class='feedback' style='color:blue;'>Public messaging was DISABLED and LOCKED OFF by an organizer.</p>";
             } else {
-                Serial.println("Received command: DISABLE public messaging, but it was already locked OFF. No change.");
+                if(VERBOSE_MODE) Serial.println("Received command: DISABLE public messaging, but it was already locked OFF. No change.");
             }
         }
     }
-
-    Serial.println("Message processed from queue: Node " + originalSenderMacSuffix + " - " + incomingContent);
-    messageProcessed = true;
+    if(VERBOSE_MODE) Serial.println("Message processed from queue: Node " + originalSenderMacSuffix + " - " + incomingContent);
   }
 
   // --- Jamming Detection Logic ---
   bool hasPeers = false;
   portENTER_CRITICAL(&lastSeenPeersMutex);
-  // A node is considered "alone" if it only knows about the broadcast MAC address.
-  // If size > 1, it has seen at least one other peer.
   hasPeers = lastSeenPeers.size() > 1;
   portEXIT_CRITICAL(&lastSeenPeersMutex);
 
-  // Jamming is only detected if we have seen peers but then stopped hearing from them.
   if (hasPeers && !isCurrentlyJammed && (millis() - lastMessageReceivedTimestamp > JAMMING_DETECTION_THRESHOLD_MS)) {
-      Serial.println("Jamming detected: No messages received from known peers for threshold duration.");
+      if(VERBOSE_MODE) Serial.println("Jamming detected: No messages received from known peers for threshold duration.");
       isCurrentlyJammed = true;
-
-      // This is a new incident, log it to permanent memory
       if (lastJammingEventTimestamp == 0) {
-          lastJammingEventTimestamp = millis(); // Set the long-term memory timestamp for this session
+          lastJammingEventTimestamp = millis();
           jammingIncidentCount++;
-          preferences.putUInt("jamCount", jammingIncidentCount); // Persist the new count
-          Serial.printf("New jamming incident logged. Total incidents: %u\n", jammingIncidentCount);
+          preferences.putUInt("jamCount", jammingIncidentCount);
+          if(VERBOSE_MODE) Serial.printf("New jamming incident logged. Total incidents: %u\n", jammingIncidentCount);
           addDisplayLog("Jamming event detected!");
       }
-
-      // Check if we should send an alert (respect cooldown)
       if (millis() - lastJammingAlertSent > JAMMING_ALERT_COOLDOWN_MS) {
-          Serial.println("Sending jamming alert to the mesh.");
+          if(VERBOSE_MODE) Serial.println("Sending jamming alert to the mesh.");
           char alertContent[32];
           snprintf(alertContent, sizeof(alertContent), "Jamming Alert from %s", MAC_suffix_str.c_str());
           createAndSendMessage(alertContent, strlen(alertContent), MSG_TYPE_JAMMING_ALERT);
@@ -1027,83 +981,68 @@ void loop() {
   }
 
   // --- Jamming Long-Term Memory Reset Logic ---
-  // If a jamming event was recorded, but communication has been restored for a while, clear the alert.
   if (lastJammingEventTimestamp > 0 && !isCurrentlyJammed && communicationRestoredTimestamp > 0 &&
       (millis() - communicationRestoredTimestamp > JAMMING_MEMORY_RESET_MS)) {
-      Serial.println("Sustained communication detected. Resetting long-term jamming memory.");
-      lastJammingEventTimestamp = 0; // Reset the long-term memory
-      communicationRestoredTimestamp = 0; // Reset the timer to prevent re-triggering
+      if(VERBOSE_MODE) Serial.println("Sustained communication detected. Resetting long-term jamming memory.");
+      lastJammingEventTimestamp = 0;
+      communicationRestoredTimestamp = 0;
       addDisplayLog("Jamming alert cleared.");
   }
 
+  // --- Infiltration Alert Reset Logic ---
+  if (isInfiltrationAlert && (millis() - lastInfiltrationEventTimestamp > JAMMING_MEMORY_RESET_MS)) {
+      if(VERBOSE_MODE) Serial.println("Infiltration alert timeout. Resetting alert status.");
+      isInfiltrationAlert = false;
+      // Also clear the history to prevent immediate re-triggering from old data
+      portENTER_CRITICAL(&passwordUpdateHistoryMutex);
+      passwordUpdateHistory.clear();
+      portEXIT_CRITICAL(&passwordUpdateHistoryMutex);
+      addDisplayLog("Infiltration alert cleared.");
+  }
 
   if (millis() - lastRebroadcast >= AUTO_REBROADCAST_INTERVAL_MS) {
     lastRebroadcast = millis();
     portENTER_CRITICAL(&seenMessagesMutex);
     std::vector<esp_now_message_t> messagesToRebroadcast;
     for (const auto& seenMsg : seenMessages) {
-      // When pulling from cache for auto-rebroadcast, the TTL in seenMsg.messageData
-      // should already be MAX_TTL_HOPS due to the change in addOrUpdateMessageToSeen.
-      // We still check > 0, though it should always be.
       if (seenMsg.messageData.ttl > 0) {
-        messagesToRebroadcast.push_back(seenMsg.messageData); // These are already encrypted in cache
+        messagesToRebroadcast.push_back(seenMsg.messageData);
       }
     }
     portEXIT_CRITICAL(&seenMessagesMutex);
-
-    for (auto& msg : messagesToRebroadcast) { // Use auto& to allow modification of msg
-      // sendToAllPeers will decrement msg's TTL.
-      // This 'msg' here is a copy from the cache, which had its TTL reset to MAX_TTL_HOPS.
+    for (auto& msg : messagesToRebroadcast) {
       sendToAllPeers(msg);
     }
   }
 
-  // Periodic discovery broadcast
   if (millis() - lastDiscoveryBroadcast >= PEER_DISCOVERY_INTERVAL_MS) {
       lastDiscoveryBroadcast = millis();
-      // Send a discovery message. The content doesn't matter much, as it's silently handled.
-      // Using our own MAC as content for identification if needed for debugging.
       createAndSendMessage(MAC_full_str.c_str(), MAC_full_str.length(), MSG_TYPE_DISCOVERY);
   }
 
-  // Periodically manage the local display log
   if (millis() - lastLocalDisplayLogManage >= LOCAL_DISPLAY_LOG_MANAGE_INTERVAL_MS) {
       lastLocalDisplayLogManage = millis();
       manageLocalDisplayLog();
   }
 
-  // Periodically manage the lastSeenPeers map and espNowAddedPeers
   if (millis() - lastSeenPeersManage >= LAST_SEEN_PEERS_MANAGE_INTERVAL_MS) {
       lastSeenPeersManage = millis();
       unsigned long currentTime = millis();
-
-      // Cleanup lastSeenPeers (for display)
       portENTER_CRITICAL(&lastSeenPeersMutex);
       for (auto it = lastSeenPeers.begin(); it != lastSeenPeers.end(); ) {
-          if ((currentTime - it->second) > PEER_LAST_SEEN_DURATION_MS) {
-              it = lastSeenPeers.erase(it);
-          } else {
-              ++it;
-          }
+          if ((currentTime - it->second) > PEER_LAST_SEEN_DURATION_MS) { it = lastSeenPeers.erase(it); }
+          else { ++it; }
       }
       portEXIT_CRITICAL(&lastSeenPeersMutex);
-
-      // Cleanup espNowAddedPeers (for sending)
       portENTER_CRITICAL(&espNowAddedPeersMutex);
       for (auto it = espNowAddedPeers.begin(); it != espNowAddedPeers.end(); ) {
-          // Do not remove the broadcast MAC address
-          if (it->first == "FF:FF:FF:FF:FF:FF") {
-              ++it;
-              continue;
-          }
+          if (it->first == "FF:FF:FF:FF:FF:FF") { ++it; continue; }
           if ((currentTime - it->second) > ESP_NOW_PEER_TIMEOUT_MS) {
-              uint8_t peerMacBytes[6];
-              unsigned int tempMac[6];
-              sscanf(it->first.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X",
-                     &tempMac[0], &tempMac[1], &tempMac[2], &tempMac[3], &tempMac[4], &tempMac[5]);
+              uint8_t peerMacBytes[6]; unsigned int tempMac[6];
+              sscanf(it->first.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", &tempMac[0], &tempMac[1], &tempMac[2], &tempMac[3], &tempMac[4], &tempMac[5]);
               for (int k = 0; k < 6; ++k) { peerMacBytes[k] = (uint8_t)tempMac[k]; }
-              esp_now_del_peer(peerMacBytes); // Remove from ESP-NOW internal peer list
-              it = espNowAddedPeers.erase(it); // Remove from our map
+              esp_now_del_peer(peerMacBytes);
+              it = espNowAddedPeers.erase(it);
           } else {
               ++it;
           }
@@ -1111,46 +1050,34 @@ void loop() {
       portEXIT_CRITICAL(&espNowAddedPeersMutex);
   }
 
-
   WiFiClient client = server.available();
   if (client) {
-    String currentLine = "";
-    String postBody = "";
-    bool isPost = false;
-    unsigned long clientTimeout = millis();
-    int contentLength = 0;
-    String requestedPath = "/";
-    String currentQueryParams = ""; // To store query parameters for redirects
+    String currentLine = ""; String postBody = ""; bool isPost = false;
+    unsigned long clientTimeout = millis(); int contentLength = 0;
+    String requestedPath = "/"; String currentQueryParams = "";
 
     while (client.connected() && (millis() - clientTimeout < 2000)) {
       if (client.available()) {
-        clientTimeout = millis();
-        char c = client.read();
+        clientTimeout = millis(); char c = client.read();
         if (c == '\n') {
           if (currentLine.length() == 0) {
             String sessionTokenParam = "";
-            
-            // Extract query parameters from the original requestedPath for both GET and POST
             int queryStart = requestedPath.indexOf('?');
             if (queryStart != -1) {
                 currentQueryParams = requestedPath.substring(queryStart + 1);
-                requestedPath = requestedPath.substring(0, queryStart); // Clean path
+                requestedPath = requestedPath.substring(0, queryStart);
             }
 
-            // Parse session_token from queryParams for GET or postBody for POST
             if (isPost) {
-                for (int i = 0; i < contentLength && client.available(); i++) {
-                    postBody += (char)client.read();
-                }
-                Serial.println("Received POST Body: " + postBody);
-
+                for (int i = 0; i < contentLength && client.available(); i++) postBody += (char)client.read();
+                if(VERBOSE_MODE) Serial.println("Received POST Body: " + postBody);
                 int tokenStart = postBody.indexOf("session_token=");
                 if (tokenStart != -1) {
                     int tokenEnd = postBody.indexOf('&', tokenStart);
                     if (tokenEnd == -1) tokenEnd = postBody.length();
                     sessionTokenParam = postBody.substring(tokenStart + 14, tokenEnd);
                 }
-            } else { // It's a GET request
+            } else {
                 int tokenStart = currentQueryParams.indexOf("session_token=");
                 if (tokenStart != -1) {
                     int tokenEnd = currentQueryParams.indexOf('&', tokenStart);
@@ -1158,99 +1085,53 @@ void loop() {
                     sessionTokenParam = currentQueryParams.substring(tokenStart + 14, tokenEnd);
                 }
             }
-            
-            isOrganizerSessionActive = isOrganizerSessionValid(sessionTokenParam); // Update session status
-            if (isOrganizerSessionActive) { // Refresh session timestamp if session is active
-                sessionTokenTimestamp = millis();
-            }
-            
-            // --- CAPTIVE PORTAL REDIRECT PATCH ---
-            // --- BEGIN: Connectivity Check Response Patch ---
+            isOrganizerSessionActive = isOrganizerSessionValid(sessionTokenParam);
+            if (isOrganizerSessionActive) sessionTokenTimestamp = millis();
+
+            // --- START: Connectivity Check Response Patch ---
             if (!isPost) {
-              bool isConnectivityCheck = false;
-              String lowerPath = requestedPath;
-              lowerPath.toLowerCase();
-              if (
-                  lowerPath == "/generate_204" ||
-                  lowerPath == "/hotspot-detect.html" ||
-                  lowerPath == "/ncsi.txt" ||
-                  lowerPath == "/connecttest.txt" ||
-                  lowerPath == "/captive-portal" ||
-                  lowerPath == "/success.txt" ||
-                  lowerPath == "/library/test/success.html" ||
-                  lowerPath.startsWith("/redirect") ||
-                  lowerPath.indexOf("connectivitycheck.gstatic.com") != -1 ||
-                  lowerPath.indexOf("msftconnecttest.com") != -1 ||
-                  lowerPath.indexOf("apple.com") != -1 ||
-                  lowerPath.indexOf("hotspot-detect.html") != -1
-                 ) {
+              bool isConnectivityCheck = false; String lowerPath = requestedPath; lowerPath.toLowerCase();
+              if (lowerPath == "/generate_204" || lowerPath == "/hotspot-detect.html" || lowerPath == "/ncsi.txt" ||
+                  lowerPath == "/connecttest.txt" || lowerPath == "/captive-portal" || lowerPath == "/success.txt" ||
+                  lowerPath == "/library/test/success.html" || lowerPath.startsWith("/redirect") ||
+                  lowerPath.indexOf("connectivitycheck.gstatic.com") != -1 || lowerPath.indexOf("msftconnecttest.com") != -1 ||
+                  lowerPath.indexOf("apple.com") != -1 || lowerPath.indexOf("hotspot-detect.html") != -1 ) {
                 isConnectivityCheck = true;
               }
 
               if (isConnectivityCheck) {
                 if (lowerPath == "/generate_204") {
-                  client.println(F("HTTP/1.1 204 No Content"));
-                  client.println(F("Connection: close"));
-                  // Added Cache-Control headers for 204 responses
-                  client.println(F("Cache-Control: no-cache, no-store, must-revalidate"));
-                  client.println(F("Pragma: no-cache"));
-                  client.println(F("Expires: 0"));
-                  client.println();
-                  client.stop();
-                  return;
+                  client.println(F("HTTP/1.1 204 No Content")); client.println(F("Connection: close"));
+                  client.println(F("Cache-Control: no-cache, no-store, must-revalidate")); client.println(F("Pragma: no-cache"));
+                  client.println(F("Expires: 0")); client.println(); client.stop(); return;
                 } else if (lowerPath == "/hotspot-detect.html" || lowerPath == "/ncsi.txt" || lowerPath == "/connecttest.txt" || lowerPath == "/success.txt") {
-                  client.println(F("HTTP/1.1 200 OK"));
-                  client.println(F("Content-Type: text/plain"));
-                  client.println(F("Connection: close"));
-                  // Added Cache-Control headers for text/plain responses
-                  client.println(F("Cache-Control: no-cache, no-store, must-revalidate"));
-                  client.println(F("Pragma: no-cache"));
-                  client.println(F("Expires: 0"));
-                  client.println();
-                  client.println("Success");
-                  client.stop();
-                  return;
+                  client.println(F("HTTP/1.1 200 OK")); client.println(F("Content-Type: text/plain")); client.println(F("Connection: close"));
+                  client.println(F("Cache-Control: no-cache, no-store, must-revalidate")); client.println(F("Pragma: no-cache"));
+                  client.println(F("Expires: 0")); client.println(); client.println("Success"); client.stop(); return;
                 } else {
-                  client.println(F("HTTP/1.1 200 OK"));
-                  client.println(F("Content-Type: text/html"));
-                  client.println(F("Connection: close"));
-                  // Added Cache-Control headers for generic HTML success responses
-                  client.println(F("Cache-Control: no-cache, no-store, must-revalidate"));
-                  client.println(F("Pragma: no-cache"));
-                  client.println(F("Expires: 0"));
-                  client.println();
-                  client.println(F("<html><head><title>Success</title></head><body>Success</body></html>"));
-                  client.stop();
-                  return;
+                  client.println(F("HTTP/1.1 200 OK")); client.println(F("Content-Type: text/html")); client.println(F("Connection: close"));
+                  client.println(F("Cache-Control: no-cache, no-store, must-revalidate")); client.println(F("Pragma: no-cache"));
+                  client.println(F("Expires: 0")); client.println();
+                  client.println(F("<html><head><title>Success</title></head><body>Success</body></html>")); client.stop(); return;
                 }
               }
             }
             // --- END: Connectivity Check Response Patch ---
-            // Handle captive portal redirect for non-root GETs unless it's a filter or session token request
             if (requestedPath != "/" && currentQueryParams.indexOf("show_public") == -1 && currentQueryParams.indexOf("show_urgent") == -1 && currentQueryParams.indexOf("session_token") == -1) {
-                Serial.println("Intercepted non-root GET request for: " + requestedPath + ". Redirecting to captive portal.");
-                client.println(F("HTTP/1.1 302 Found"));
-                client.println(F("Location: http://192.168.4.1/"));
-                client.println(F("Connection: close"));
-                // Added Cache-Control headers for 302 redirects
-                client.println(F("Cache-Control: no-cache, no-store, must-revalidate"));
-                client.println(F("Pragma: no-cache"));
-                client.println(F("Expires: 0"));
-                client.println();
-                client.stop();
-                return;
+                if(VERBOSE_MODE) Serial.println("Intercepted non-root GET request for: " + requestedPath + ". Redirecting to captive portal.");
+                client.println(F("HTTP/1.1 302 Found")); client.println(F("Location: http://192.168.4.1/"));
+                client.println(F("Connection: close")); client.println(F("Cache-Control: no-cache, no-store, must-revalidate"));
+                client.println(F("Pragma: no-cache")); client.println(F("Expires: 0")); client.println(); client.stop(); return;
             }
 
             if (isPost) {
               String messageParam = "", passwordParam = "", urgentParam = "", actionParam = "", newPasswordParam = "", confirmNewPasswordParam = "";
-
               int messageStart = postBody.indexOf("message=");
               if (messageStart != -1) {
                 int messageEnd = postBody.indexOf('&', messageStart);
                 if (messageEnd == -1) messageEnd = postBody.length();
                 messageParam = postBody.substring(messageStart + 8, messageEnd);
               }
-              // This is the plaintext password from the client
               int passwordStart = postBody.indexOf("password_plaintext_client=");
               if (passwordStart != -1) {
                 int passwordEnd = postBody.indexOf('&', passwordStart);
@@ -1278,276 +1159,152 @@ void loop() {
               }
 
               // Decode URL-encoded parameters
-              messageParam.replace('+', ' ');
-              String decodedMessage = "";
+              messageParam.replace('+', ' '); String decodedMessage = "";
               for (int i = 0; i < messageParam.length(); i++) {
-                if (messageParam.charAt(i) == '%' && (i + 2) < messageParam.length()) {
-                  char decodedChar = (char)strtol((messageParam.substring(i + 1, i + 3)).c_str(), NULL, 16);
-                  decodedMessage += decodedChar;
-                  i += 2;
-                } else {
-                  decodedMessage += messageParam.charAt(i);
-                }
+                if (messageParam.charAt(i) == '%' && (i + 2) < messageParam.length()) { decodedMessage += (char)strtol((messageParam.substring(i + 1, i + 3)).c_str(), NULL, 16); i += 2; }
+                else { decodedMessage += messageParam.charAt(i); }
               }
-
-              passwordParam.replace('+', ' ');
-              String decodedPassword = "";
+              passwordParam.replace('+', ' '); String decodedPassword = "";
               for (int i = 0; i < passwordParam.length(); i++) {
-                if (passwordParam.charAt(i) == '%' && (i + 2) < passwordParam.length()) {
-                  char decodedChar = (char)strtol((passwordParam.substring(i + 1, i + 3)).c_str(), NULL, 16);
-                  decodedPassword += decodedChar;
-                  i += 2;
-                } else {
-                  decodedPassword += passwordParam.charAt(i);
-                }
+                if (passwordParam.charAt(i) == '%' && (i + 2) < passwordParam.length()) { decodedPassword += (char)strtol((messageParam.substring(i + 1, i + 3)).c_str(), NULL, 16); i += 2; }
+                else { decodedPassword += passwordParam.charAt(i); }
               }
-
-              newPasswordParam.replace('+', ' ');
-              String decodedNewPassword = "";
+              newPasswordParam.replace('+', ' '); String decodedNewPassword = "";
               for (int i = 0; i < newPasswordParam.length(); i++) {
-                if (newPasswordParam.charAt(i) == '%' && (i + 2) < newPasswordParam.length()) {
-                  char decodedChar = (char)strtol((newPasswordParam.substring(i + 1, i + 3)).c_str(), NULL, 16);
-                  decodedNewPassword += decodedChar;
-                  i += 2;
-                } else {
-                  decodedNewPassword += newPasswordParam.charAt(i);
-                }
+                if (newPasswordParam.charAt(i) == '%' && (i + 2) < newPasswordParam.length()) { decodedNewPassword += (char)strtol((newPasswordParam.substring(i + 1, i + 3)).c_str(), NULL, 16); i += 2; }
+                else { decodedNewPassword += newPasswordParam.charAt(i); }
               }
-              
-              confirmNewPasswordParam.replace('+', ' ');
-              String decodedConfirmNewPassword = "";
+              confirmNewPasswordParam.replace('+', ' '); String decodedConfirmNewPassword = "";
               for (int i = 0; i < confirmNewPasswordParam.length(); i++) {
-                if (confirmNewPasswordParam.charAt(i) == '%' && (i + 2) < confirmNewPasswordParam.length()) {
-                  char decodedChar = (char)strtol((confirmNewPasswordParam.substring(i + 1, i + 3)).c_str(), NULL, 16);
-                  decodedConfirmNewPassword += decodedChar;
-                  i += 2;
-                } else {
-                  decodedConfirmNewPassword += confirmNewPasswordParam.charAt(i);
-                }
+                if (confirmNewPasswordParam.charAt(i) == '%' && (i + 2) < confirmNewPasswordParam.length()) { decodedConfirmNewPassword += (char)strtol((confirmNewPasswordParam.substring(i + 1, i + 3)).c_str(), NULL, 16); i += 2; }
+                else { decodedConfirmNewPassword += confirmNewPasswordParam.charAt(i); }
               }
-
 
               if (actionParam == "enterOrganizer") {
-                  if (lockoutTime > 0 && millis() < lockoutTime) {
-                      webFeedbackMessage = "<p class='feedback' style='color:red;'>Too many failed attempts. Try again later.</p>";
-                  } else {
-                      if (lockoutTime > 0 && millis() >= lockoutTime) {
-                          lockoutTime = 0;
-                          loginAttempts = 0;
-                      }
-
-                      // Hash the received plaintext password and compare it to the stored hash
+                  if (lockoutTime > 0 && millis() < lockoutTime) { webFeedbackMessage = "<p class='feedback' style='color:red;'>Too many failed attempts. Try again later.</p>"; }
+                  else {
+                      if (lockoutTime > 0 && millis() >= lockoutTime) { lockoutTime = 0; loginAttempts = 0; }
                       String receivedPasswordHash = simpleHash(decodedPassword);
-                      
-                      Serial.print("Current hashedOrganizerPassword (for login): '"); Serial.print(hashedOrganizerPassword); Serial.println("'");
-                      Serial.print("Received Password Hash (after hashing plaintext): '"); Serial.print(receivedPasswordHash); Serial.println("'");
-
+                      if(VERBOSE_MODE) {
+                          Serial.print("Current hashedOrganizerPassword (for login): '"); Serial.print(hashedOrganizerPassword); Serial.println("'");
+                          Serial.print("Received Password Hash (after hashing plaintext): '"); Serial.print(receivedPasswordHash); Serial.println("'");
+                      }
                       if (receivedPasswordHash.equalsIgnoreCase(hashedOrganizerPassword)) {
                           loginAttempts = 0;
                           organizerSessionToken = String(esp_random()) + String(esp_random());
                           sessionTokenTimestamp = millis();
                           isOrganizerSessionActive = true;
                           webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer Mode activated.</p>";
-                          if (!passwordChangeLocked) {
-                              webFeedbackMessage += "<p class='feedback' style='color:orange;'>Note: Node's organizer password is still default. Set a new password to enable sending messages.</p>";
-                          }
-                          
-                          // Preserve existing query parameters for redirect
+                          if (!passwordChangeLocked) { webFeedbackMessage += "<p class='feedback' style='color:orange;'>Note: Node's organizer password is still default. Set a new password to enable sending messages.</p>"; }
                           String redirectQuery = currentQueryParams;
                           if (redirectQuery.length() > 0) redirectQuery += "&";
                           redirectQuery += "session_token=" + organizerSessionToken;
-
-                          client.println(F("HTTP/1.1 303 See Other"));
-                          client.println("Location: /?" + redirectQuery); // Preserve query params
-                          client.println(F("Connection: close"));
-                          // Added Cache-Control headers for 303 redirect after POST
-                          client.println(F("Cache-Control: no-cache, no-store, must-revalidate"));
-                          client.println(F("Pragma: no-cache"));
-                          client.println(F("Expires: 0"));
-                          client.println();
-                          client.stop();
-                          return;
+                          client.println(F("HTTP/1.1 303 See Other")); client.println("Location: /?" + redirectQuery);
+                          client.println(F("Connection: close")); client.println(F("Cache-Control: no-cache, no-store, must-revalidate"));
+                          client.println(F("Pragma: no-cache")); client.println(F("Expires: 0")); client.println(); client.stop(); return;
                       } else {
                           loginAttempts++;
                           if (loginAttempts >= MAX_LOGIN_ATTEMPTS) {
-                              lockoutTime = millis() + LOCKOUT_DURATION_MS;
-                              loginAttempts = 0;
+                              lockoutTime = millis() + LOCKOUT_DURATION_MS; loginAttempts = 0;
                               webFeedbackMessage = "<p class='feedback' style='color:red;'>Login locked for 5 minutes due to too many failures.</p>";
-                          } else {
-                              webFeedbackMessage = "<p class='feedback' style='color:red;'>Incorrect password. " + String(MAX_LOGIN_ATTEMPTS - loginAttempts) + " attempts remaining.</p>";
-                          }
+                          } else { webFeedbackMessage = "<p class='feedback' style='color:red;'>Incorrect password. " + String(MAX_LOGIN_ATTEMPTS - loginAttempts) + " attempts remaining.</p>"; }
                       }
                   }
               } else if (actionParam == "exitOrganizer") {
-                  // Clear any previous feedback message before setting a new one for exit
-                  webFeedbackMessage = ""; 
-                  if (isOrganizerSessionActive) { // Check if there's an active session to exit
-                      organizerSessionToken = "";
-                      isOrganizerSessionActive = false; // User exited web session
+                  webFeedbackMessage = "";
+                  if (isOrganizerSessionActive) {
+                      organizerSessionToken = ""; isOrganizerSessionActive = false;
                       webFeedbackMessage = "<p class='feedback' style='color:blue;'>Exited Organizer Mode.</p>";
-                  } else {
-                      webFeedbackMessage = "<p class='feedback' style='color:orange;'>Not currently in Organizer Mode.</p>"; // Provide feedback even if not active
-                  }
+                  } else { webFeedbackMessage = "<p class='feedback' style='color:orange;'>Not currently in Organizer Mode.</p>"; }
               } else if (actionParam == "togglePublic") {
-                  // Only allow if organizer session is active AND node is capable (password set)
-                  if (isOrganizerSessionActive && passwordChangeLocked) { 
+                  if (isOrganizerSessionActive && passwordChangeLocked) {
                       sessionTokenTimestamp = millis();
-                      // Check if public messaging is locked OFF
-                      if (publicMessagingLocked) {
-                          webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Public messaging is locked OFF. Cannot re-enable.</p>";
-                      } else {
+                      if (publicMessagingLocked) { webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Public messaging is locked OFF. Cannot re-enable.</p>"; }
+                      else {
                           publicMessagingEnabled = !publicMessagingEnabled;
                           webFeedbackMessage = "<p class='feedback' style='color:blue;'>Public messaging has been " + String(publicMessagingEnabled ? "ENABLED" : "DISABLED") + ".</p>";
                           createAndSendMessage(publicMessagingEnabled ? CMD_PUBLIC_ON : CMD_PUBLIC_OFF, strlen(publicMessagingEnabled ? CMD_PUBLIC_ON : CMD_PUBLIC_OFF), MSG_TYPE_COMMAND);
                       }
-                  } else {
-                      webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Not logged in as organizer or node's password not set.</p>";
-                  }
+                  } else { webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Not logged in as organizer or node's password not set.</p>"; }
               } else if (actionParam == "sendMessage") {
-                  // Only allow if organizer session is active AND node is capable (password set)
-                  if (isOrganizerSessionActive && passwordChangeLocked) { 
+                  if (isOrganizerSessionActive && passwordChangeLocked) {
                       sessionTokenTimestamp = millis();
-                      if (decodedMessage.length() == 0) {
-                          webFeedbackMessage = "<p class='feedback' style='color:orange;'>Please enter a message.</p>";
-                      } else {
-                          uint8_t messageType = MSG_TYPE_ORGANIZER; // Default to organizer for this form
-                          if (urgentParam == "on") {
-                              decodedMessage = "Urgent: " + decodedMessage; // Prepend "Urgent: "
-                          }
-                          if (decodedMessage.length() >= MAX_MESSAGE_CONTENT_LEN) {
-                              decodedMessage = decodedMessage.substring(0, MAX_MESSAGE_CONTENT_LEN - 1);
-                          }
+                      if (decodedMessage.length() == 0) { webFeedbackMessage = "<p class='feedback' style='color:orange;'>Please enter a message.</p>"; }
+                      else {
+                          uint8_t messageType = MSG_TYPE_ORGANIZER;
+                          if (urgentParam == "on") decodedMessage = "Urgent: " + decodedMessage;
+                          if (decodedMessage.length() >= MAX_MESSAGE_CONTENT_LEN) decodedMessage = decodedMessage.substring(0, MAX_MESSAGE_CONTENT_LEN - 1);
                           createAndSendMessage(decodedMessage.c_str(), decodedMessage.length(), messageType);
-                          // createAndSendMessage will set webFeedbackMessage if not capable
-                          if (webFeedbackMessage.length() == 0) { // Only set if createAndSendMessage didn't set an error
-                              webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer message queued!</p>";
-                          }
+                          if (webFeedbackMessage.length() == 0) webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer message queued!</p>";
                       }
-                  } else {
-                      webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Not logged in as organizer or node's password not set.</p>";
-                  }
+                  } else { webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Not logged in as organizer or node's password not set.</p>"; }
               } else if (actionParam == "sendPublicMessage") {
-                  // Only allow if public messaging is enabled AND node is capable (password set)
-                  if (publicMessagingEnabled && passwordChangeLocked) { 
-                      if (decodedMessage.length() == 0) {
-                          webFeedbackMessage = "<p class='feedback' style='color:orange;'>Please enter a message.</p>";
-                      } else {
-                          if (decodedMessage.length() >= MAX_MESSAGE_CONTENT_LEN) {
-                              decodedMessage = decodedMessage.substring(0, MAX_MESSAGE_CONTENT_LEN - 1);
-                          }
+                  if (publicMessagingEnabled && passwordChangeLocked) {
+                      if (decodedMessage.length() == 0) { webFeedbackMessage = "<p class='feedback' style='color:orange;'>Please enter a message.</p>"; }
+                      else {
+                          if (decodedMessage.length() >= MAX_MESSAGE_CONTENT_LEN) decodedMessage = decodedMessage.substring(0, MAX_MESSAGE_CONTENT_LEN - 1);
                           createAndSendMessage(decodedMessage.c_str(), decodedMessage.length(), MSG_TYPE_PUBLIC);
-                          // createAndSendMessage will set webFeedbackMessage if not capable
-                          if (webFeedbackMessage.length() == 0) { // Only set if createAndSendMessage didn't set an error
-                              webFeedbackMessage = "<p class='feedback' style='color:green;'>Public message queued!</p>";
-                          }
+                          if (webFeedbackMessage.length() == 0) webFeedbackMessage = "<p class='feedback' style='color:green;'>Public message queued!</p>";
                       }
-                  } else {
-                      // This message should only appear on the organizer page if an organizer tries to send a public message
-                      // when public messaging is disabled or the node is not capable.
-                      // For public users, the public message form is simply hidden if publicMessagingEnabled is false.
-                      if (isOrganizerSessionActive) { // Only show this feedback if an organizer is logged in
-                          webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Public messaging is disabled or node's password not set.</p>";
-                      }
+                  } else if (isOrganizerSessionActive) {
+                      webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Public messaging is disabled or node's password not set.</p>";
                   }
               } else if (actionParam == "rebroadcastCache") {
-                  // Only allow if organizer session is active AND node is capable (password set)
-                  if (isOrganizerSessionActive && passwordChangeLocked) { 
-                      sessionTokenTimestamp = millis();
-                      int rebroadcastedCount = 0;
+                  if (isOrganizerSessionActive && passwordChangeLocked) {
+                      sessionTokenTimestamp = millis(); int rebroadcastedCount = 0;
                       portENTER_CRITICAL(&seenMessagesMutex);
-                      std::vector<esp_now_message_t> messagesToRebroadcast;
                       for (const auto& seenMsg : seenMessages) {
-                          // When pulling from cache for auto-rebroadcast, the TTL in seenMsg.messageData
-                          // should already be MAX_TTL_HOPS due to the change in addOrUpdateMessageToSeen.
-                          // We still check > 0, though it should always be.
                           if (seenMsg.messageData.ttl > 0) {
-                            // Create a copy to send, decrementing its TTL for this hop
                             esp_now_message_t msgCopy = seenMsg.messageData;
-                            sendToAllPeers(msgCopy); // msgCopy's TTL will be decremented here
+                            sendToAllPeers(msgCopy);
                             rebroadcastedCount++;
                           }
                       }
                       portEXIT_CRITICAL(&seenMessagesMutex);
                       webFeedbackMessage = "<p class='feedback' style='color:green;'>Re-broadcasted " + String(rebroadcastedCount) + " messages!</p>";
-                  } else {
-                      webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Not logged in as organizer or node's password not set.</p>";
-                  }
+                  } else { webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Not logged in as organizer or node's password not set.</p>"; }
               } else if (actionParam == "setOrganizerPassword") {
-                  // If passwordChangeLocked is true, we prevent changing it and show a message.
+                  // MODIFICATION: Implement password lock. Once set, it cannot be changed until reboot.
                   if (passwordChangeLocked) {
                       webFeedbackMessage = "<p class='feedback' style='color:red;'>The organizer password for this node cannot be changed after it has been set. To reset the password, you must reboot the board.</p>";
-                  } else if (isOrganizerSessionActive || !passwordChangeLocked) { // Proceed only if not locked
-                      sessionTokenTimestamp = millis();
-                      Serial.println("Attempting to set new password.");
-                      Serial.print("Decoded New Password: '"); Serial.print(decodedNewPassword); Serial.println("'");
-                      Serial.print("Decoded Confirm Password: '"); Serial.print(decodedConfirmNewPassword); Serial.println("'");
-
+                  } else { // This block only runs if the password has NOT been set yet.
+                      if(VERBOSE_MODE) Serial.println("Attempting to set new password for the first time.");
                       if (decodedNewPassword.length() == 0) {
                           webFeedbackMessage = "<p class='feedback' style='color:orange;'>New password cannot be empty.</p>";
-                      } else if (decodedNewPassword != decodedConfirmNewPassword) { // Check if passwords match
+                      } else if (decodedNewPassword != decodedConfirmNewPassword) {
                           webFeedbackMessage = "<p class='feedback' style='color:red;'>New passwords do not match. Please try again.</p>";
-                      }
-                      else {
-                          // Update local hashed password
-                          hashedOrganizerPassword = simpleHash(decodedNewPassword);
-                          passwordChangeLocked = true; // Lock future password changes on this board immediately (node is now capable)
-                          Serial.print("New hashedOrganizerPassword (after update): '"); Serial.print(hashedOrganizerPassword); Serial.println("'");
+                      } else {
+                          deriveAndSetSessionKey(decodedNewPassword);
                           webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer password updated successfully!</p>";
-                          loginAttempts = 0; // Reset login attempts on successful password change
+                          loginAttempts = 0;
                           lockoutTime = 0;
-
-                          // Broadcast the new password (plaintext) to the mesh
-                          // It will be hashed and encrypted by createAndSendMessage
                           createAndSendMessage(decodedNewPassword.c_str(), decodedNewPassword.length(), MSG_TYPE_PASSWORD_UPDATE);
-                          
-                          // After setting the password, if we are in an organizer session,
-                          // this node is now capable of sending messages.
                       }
-                  } else {
-                      // This else block handles cases where it's not locked but also not an active session
-                      // (e.g., trying to set initial password without a valid session, which shouldn't happen with the UI flow)
-                      webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Invalid or expired session to change password.</p>";
                   }
               }
-
               client.println(F("HTTP/1.1 303 See Other"));
-              // Preserve current query parameters for redirect
               String redirectQuery = currentQueryParams;
-              if (isOrganizerSessionActive && sessionTokenParam.length() > 0) { // Ensure session token is preserved if active
+              if (isOrganizerSessionActive && sessionTokenParam.length() > 0) {
                   if (redirectQuery.length() > 0) redirectQuery += "&";
                   redirectQuery += "session_token=" + sessionTokenParam;
               }
               client.println("Location: /?" + redirectQuery);
-              client.println(F("Connection: close"));
-              // Added Cache-Control headers for 303 redirect after POST
-              client.println(F("Cache-Control: no-cache, no-store, must-revalidate"));
-              client.println(F("Pragma: no-cache"));
-              client.println(F("Expires: 0"));
-              client.println();
-              client.stop();
-              return;
+              client.println(F("Connection: close")); client.println(F("Cache-Control: no-cache, no-store, must-revalidate"));
+              client.println(F("Pragma: no-cache")); client.println(F("Expires: 0")); client.println(); client.stop(); return;
             }
 
-            // --- HTML Generation for Web Interface ---
             String detectedNodesHtmlContent = "<div class='recent-senders-display-wrapper'><span class='detected-nodes-label'>Senders:</span><div class='detected-nodes-mac-list'>";
             int count = 0;
-            portENTER_CRITICAL(&lastSeenPeersMutex); // Use the lastSeenPeers for display
+            portENTER_CRITICAL(&lastSeenPeersMutex);
             std::vector<std::pair<String, unsigned long>> sortedSeenPeers;
             for (auto const& [macStr, timestamp] : lastSeenPeers) { sortedSeenPeers.push_back({macStr, timestamp}); }
             std::sort(sortedSeenPeers.begin(), sortedSeenPeers.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
-
-            const int MAX_NODES_TO_DISPLAY_WEB = 4; // Max nodes to display on web interface
-            for (const auto& macPair : sortedSeenPeers) { 
+            const int MAX_NODES_TO_DISPLAY_WEB = 4;
+            for (const auto& macPair : sortedSeenPeers) {
                 if (count >= MAX_NODES_TO_DISPLAY_WEB) break;
-                uint8_t macBytes[6];
-                unsigned int tempMac[6]; // Temporary array for sscanf
-                sscanf(macPair.first.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X",
-                       &tempMac[0], &tempMac[1], &tempMac[2], &tempMac[3], &tempMac[4], &tempMac[5]);
-                // Copy values from temporary unsigned int array to uint8_t array
-                for (int k = 0; k < 6; ++k) {
-                    macBytes[k] = (uint8_t)tempMac[k];
-                }
-
+                uint8_t macBytes[6]; unsigned int tempMac[6];
+                sscanf(macPair.first.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", &tempMac[0], &tempMac[1], &tempMac[2], &tempMac[3], &tempMac[4], &tempMac[5]);
+                for (int k = 0; k < 6; ++k) macBytes[k] = (uint8_t)tempMac[k];
                 detectedNodesHtmlContent += "<span class='detected-node-item-compact'>" + formatMaskedMac(macBytes) + "</span>";
                 count++;
             }
@@ -1558,61 +1315,58 @@ void loop() {
             client.println(F("HTTP/1.1 200 OK"));
             client.println(F("Content-type:text/html"));
             client.println(F("Connection: close"));
-            // --- START: Added Cache-Control Headers for main HTML page ---
             client.println(F("Cache-Control: no-cache, no-store, must-revalidate"));
             client.println(F("Pragma: no-cache"));
             client.println(F("Expires: 0"));
-            // --- END: Added Cache-Control Headers for main HTML page ---
             client.println();
             client.println(F("<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Protest Info Node</title><style>"));
             client.println(F("body{font-family:Helvetica,Arial,sans-serif;margin:0;padding:0;background-color:#f8f8f8;color:#333;display:flex;flex-direction:column;min-height:100vh;}"));
-            client.println(F("header{background-color:#f0f0f0;padding:10px 15px;border-bottom:1px solid #ddd;text-align:center; display: flex; flex-direction: column; align-items: center; justify-content: center;}")); // Added flexbox for centering
+            client.println(F("header{background-color:#f0f0f0;padding:10px 15px;border-bottom:1px solid #ddd;text-align:center; display: flex; flex-direction: column; align-items: center; justify-content: center; width:100%;}"));
             client.println(F("h1,h2,h3{margin:0;padding:5px 0;color:#333;text-align:center;} h1{font-size:1.4em;} h2{font-size:1.2em;} h3{font-size:1.1em;margin-bottom:10px;}"));
             client.println(F("p{margin:3px 0;font-size:0.9em;text-align:center;} .info-line{font-size:0.8em;color:#666;margin-bottom:10px;}"));
             client.println(F(".content-wrapper{display:flex;flex-direction:column;align-items:center;width:100%;max-width:900px;margin:15px auto;padding:0 10px;flex-grow:1;}"));
             client.println(F(".chat-main-content{flex:1;width:100%;max-width:700px;margin:0 auto;background:#fff;padding:15px;border-radius:8px;box-shadow:0 2px 5px rgba(0,0,0,0.1);border:1px solid #ddd;}"));
             client.println(F("pre{background:#eee;padding:10px;border-radius:5px;text-align:left;max-width:100%;overflow-x:auto;white-space:pre-wrap;word-wrap:break-word;font-size:0.85em;border:1px solid #ccc;min-height:200px;}"));
             client.println(F("details, .form-container{background:#fff;padding:15px;border-radius:8px;box-shadow:0 2px 5px rgba(0,0,0,0.1);max-width:450px;margin:15px auto;border:1px solid #ddd;}"));
-            client.println(F("summary{font-size:1.1em;font-weight:bold;cursor:pointer;padding:5px 0;text-align:center; outline: none; border: none;} /* Added outline and border none */"));
+            client.println(F("summary{font-size:1.1em;font-weight:bold;cursor:pointer;padding:5px 0;text-align:center; outline: none; border: none;}"));
             client.println(F("form{display:flex;flex-direction:column;align-items:center;margin-top:10px;}"));
             client.println(F("label{font-size:0.9em;margin-bottom:5px;align-self:flex-start;width:80%;}"));
             client.println(F("input[type=text],input[type=password]{width:80%;max-width:350px;padding:8px;margin-bottom:10px;border-radius:4px;border:1px solid #ccc;font-size:0.9em;}"));
-            client.println(F("input[type=submit], .button-link{background-color:#007bff;color:white!important;padding:8px 15px;border:none;border-radius:4px;cursor:pointer;font-size:1em;transition:background-color 0.3s ease;text-decoration:none;display:block; margin: 0 auto;}"));
+            client.println(F("input[type=submit]{background-color:#007bff;color:white!important;padding:8px 15px;border:none;border-radius:4px;cursor:pointer;font-size:1em;transition:background-color 0.3s ease;text-decoration:none;display:block; margin: 0 auto;}"));
+            client.println(F(".button-link{background-color:#007bff;color:white!important;border:none;border-radius:4px;cursor:pointer;font-size:1em;transition:background-color 0.3s ease;text-decoration:none;display:inline-block; width:85px; padding: 8px 5px; line-height:1.3; text-align:center;}"));
             client.println(F(".button-link.secondary{background-color:#6c757d;} .button-link.secondary:hover{background-color:#5a6268;}"));
-            client.println(F(".button-link.disabled{background-color:#cccccc; cursor: not-allowed;}")); // Style for disabled buttons
-            client.println(F(".recent-senders-display-wrapper{display:flex;flex-direction:column;align-items:center;width:100%;max-width:450px;background:#e6f7ff;border:1px solid #cceeff;border-radius:12px;padding:10px 15px;font-size:0.75em;color:#0056b3;margin:15px auto; box-sizing: border-box;}")); // Added box-sizing
+            client.println(F(".button-link.disabled{background-color:#cccccc; cursor: not-allowed;}"));
+            client.println(F(".recent-senders-display-wrapper{display:flex;flex-direction:column;align-items:center;width:100%;max-width:450px;background:#e6f7ff;border:1px solid #cceeff;border-radius:12px;padding:10px 15px;font-size:0.75em;color:#0056b3;margin:15px auto; box-sizing: border-box;}"));
             client.println(F(".detected-nodes-label{font-weight:bold;margin-bottom:5px;color:#003366;}"));
-            client.println(F(".detected-nodes-mac-list{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;width:100%;}")); // Added flex-wrap
+            client.println(F(".detected-nodes-mac-list{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;width:100%;}"));
             client.println(F("</style></head><body><script>"));
-            client.println(F("document.addEventListener('DOMContentLoaded', () => {"));
-            client.println(F("    const preElement = document.querySelector('pre');"));
-            client.println(F("    if (preElement) { preElement.scrollTop = 0; }"));
-            client.println(F("});"));
+            client.println(F("document.addEventListener('DOMContentLoaded', () => { const preElement = document.querySelector('pre'); if (preElement) { preElement.scrollTop = 0; } });"));
             client.println(F("</script>"));
             client.println(F("<body><header><h1>Protest Information Node</h1>"));
             client.printf("<p class='info-line'><strong>IP:</strong> %s | <strong>MAC:</strong> %s</p>", IP.toString().c_str(), MAC_suffix_str.c_str());
             client.println(F("<p style='font-weight:bold; color:#007bff; margin-top:10px;'>All protest activities are non-violent. Please remain calm, even if others are not.</p>"));
-            if (publicMessagingEnabled) {
-                client.println(F("<p class='feedback' style='color:orange;'>Warning: Public messages are unmoderated.</p>"));
-            }
+            if (publicMessagingEnabled) { client.println(F("<p class='feedback' style='color:orange;'>Warning: Public messages are unmoderated.</p>")); }
             client.println(F("</header>"));
 
-            // --- Jamming Alert Banner ---
-            if (lastJammingEventTimestamp > 0) {
-                client.println(F("<div style='background-color:#ffdddd; border:1px solid #f5c6cb; color:#721c24; padding:10px; text-align:center; font-weight:bold;'>WARNING: JAMMING EVENT DETECTED</div>"));
-            }
-
+            if (lastJammingEventTimestamp > 0) { client.println(F("<div style='background-color:#ffdddd; border:1px solid #f5c6cb; color:#721c24; padding:10px; text-align:center; font-weight:bold;'>WARNING: JAMMING EVENT DETECTED</div>")); }
+            if (isInfiltrationAlert) { client.println(F("<div style='background-color:#fff3cd; border:1px solid #ffeeba; color:#856404; padding:10px; text-align:center; font-weight:bold;'>WARNING: INFILTRATION ATTEMPT DETECTED</div>")); }
             client.println(F("<div class='content-wrapper'><div class='chat-main-content'>"));
-
             if (webFeedbackMessage.length() > 0) { client.println(webFeedbackMessage); webFeedbackMessage = ""; }
 
             bool showPublicView = (currentQueryParams.indexOf("show_public=true") != -1);
             bool showUrgentView = (currentQueryParams.indexOf("show_urgent=true") != -1);
-            
+            bool hideSystemView = (isOrganizerSessionActive && currentQueryParams.indexOf("hide_system=true") != -1);
             String displayedBuffer;
             portENTER_CRITICAL(&localDisplayLogMutex);
             for (const auto& entry : localDisplayLog) {
                 const auto& msg = entry.message;
+                bool isSystemMessage = (msg.messageType == MSG_TYPE_COMMAND || msg.messageType == MSG_TYPE_AUTO_INIT);
+
+                // Filter 1: Hide system messages completely if not an organizer
+                if (!isOrganizerSessionActive && isSystemMessage) {
+                    continue;
+                }
+                
                 String formattedLine = "Node " + getMacSuffix(msg.originalSenderMac) + " - ";
                 if (msg.messageType == MSG_TYPE_ORGANIZER) formattedLine += "Organizer: ";
                 else if (msg.messageType == MSG_TYPE_PUBLIC) formattedLine += "Public: ";
@@ -1620,17 +1374,15 @@ void loop() {
                 else if (msg.messageType == MSG_TYPE_AUTO_INIT) formattedLine += "Auto: ";
                 formattedLine += String(msg.content);
 
-                // Skip password update messages from display log
-                if (msg.messageType == MSG_TYPE_PASSWORD_UPDATE) { 
-                    continue; 
-                }
-
-                // Apply filters
+                if (msg.messageType == MSG_TYPE_PASSWORD_UPDATE) { continue; }
+                
                 bool passesPublicFilter = !(formattedLine.indexOf("Public: ") != -1 && !showPublicView);
-                bool passesUrgentFilter = !(formattedLine.indexOf("Urgent: ") == -1 && showUrgentView); // Only show urgent if showUrgentView is true
+                bool passesUrgentFilter = !(formattedLine.indexOf("Urgent: ") == -1 && showUrgentView);
+                // Filter 2: Apply the organizer's toggle for system messages
+                bool passesSystemFilter = !(isSystemMessage && hideSystemView);
 
-                if (passesPublicFilter && passesUrgentFilter) {
-                    displayedBuffer += escapeHtml(formattedLine) + "\n";
+                if (passesPublicFilter && passesUrgentFilter && passesSystemFilter) { 
+                    displayedBuffer += escapeHtml(formattedLine) + "\n"; 
                 }
             }
             portEXIT_CRITICAL(&localDisplayLogMutex);
@@ -1639,288 +1391,181 @@ void loop() {
             client.print(displayedBuffer);
             client.println(F("</pre>"));
 
-            // Filter buttons
-            client.println(F("<div style='text-align:center; margin: 15px; display:flex; justify-content:center; gap: 10px;'>"));
-            
-            // Public Filter Button
-            String publicLink = "/";
-            if (showPublicView) { // If currently showing public, link to hide public (preserve urgent state)
-                publicLink += "?" + buildQueryString(sessionTokenParam, false, showUrgentView);
-            } else { // If currently NOT showing public, link to show public (and disable urgent)
-                publicLink += "?" + buildQueryString(sessionTokenParam, true, false);
-            }
+            client.println(F("<div style='text-align:center; margin: 15px; display:flex; justify-content:center; gap: 10px; flex-wrap: wrap;'>"));
+            String publicLink = "/?" + buildQueryString(sessionTokenParam, !showPublicView, showPublicView ? showUrgentView : false, hideSystemView);
             client.print("<a href='" + publicLink + "' class='button-link" + (showPublicView ? " secondary" : "") + "'>");
-            client.print(showPublicView ? "Hide Public Messages" : "Show Public Messages");
-            client.println("</a>");
-
-            // Urgent Filter Button
-            String urgentLink = "/";
-            if (showUrgentView) { // If currently showing urgent, link to show all (preserve public state)
-                urgentLink += "?" + buildQueryString(sessionTokenParam, showPublicView, false);
-            } else { // If currently NOT showing urgent, link to show urgent (and disable public)
-                urgentLink += "?" + buildQueryString(sessionTokenParam, false, true);
-            }
+            client.print(showPublicView ? "Hide<br>Public" : "Show<br>Public"); client.println("</a>");
+            String urgentLink = "/?" + buildQueryString(sessionTokenParam, showUrgentView ? showPublicView : false, !showUrgentView, hideSystemView);
             client.print("<a href='" + urgentLink + "' class='button-link" + (showUrgentView ? " secondary" : "") + "'>");
-            client.print(showUrgentView ? "Show All Messages" : "Show Urgent Only");
-            client.println("</a>");
-
+            client.print(showUrgentView ? "Show<br>All" : "Only<br>Urgent"); client.println("</a>");
+            if (isOrganizerSessionActive) {
+                String systemLink = "/?" + buildQueryString(sessionTokenParam, showPublicView, showUrgentView, !hideSystemView);
+                client.print("<a href='" + systemLink + "' class='button-link" + (hideSystemView ? " secondary" : "") + "'>");
+                client.print(hideSystemView ? "Show<br>System" : "Hide<br>System"); client.println("</a>");
+            }
             client.println(F("</div>"));
 
-
-            // Display Organizer Controls based on session token (isOrganizerSessionActive)
             if(isOrganizerSessionActive) {
                 client.println(F("<details open><summary>Organizer Controls</summary>"));
                 client.println(F("<div class='form-container' style='box-shadow:none;border:none;padding-top:5px;'>"));
-                
-                // Only show message sending forms if the node is capable (password set)
                 if (passwordChangeLocked) {
                     client.println(F("<h3>Send Organizer Message:</h3><form action='/' method='POST'><input type='hidden' name='action' value='sendMessage'>"));
                     client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
-                    // Preserve current filter states for redirect
                     if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
                     if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
-
+                    if (hideSystemView) client.println(F("<input type='hidden' name='hide_system' value='true'>"));
                     client.printf(F("<label for='msg_input'>Message:</label><input type='text' id='msg_input' name='message' required maxlength='%d'>"), MAX_WEB_MESSAGE_INPUT_LENGTH);
                     client.println(F("<div style='display:flex;align-items:center;justify-content:center;width:80%;margin-bottom:10px;'><input type='checkbox' id='urgent_input' name='urgent' value='on' style='margin-right:8px;'><label for='urgent_input' style='margin-bottom:0;'>Urgent Message</label></div>"));
                     client.println(F("<input type='submit' value='Send Message'></form></div>"));
-
                     client.println(F("<div class='form-container' style='box-shadow:none;border:none;padding-top:5px;margin-top:5px;'><h3>Admin Actions</h3>"));
                     client.println(F("<form action='/' method='POST' style='flex-direction:row;justify-content:center;gap:10px;'>"));
                     client.println(F("<input type='hidden' name='action' value='rebroadcastCache'>"));
                     client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
                     if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
                     if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
+                    if (hideSystemView) client.println(F("<input type='hidden' name='hide_system' value='true'>"));
                     client.println(F("<input type='submit' value='Re-broadcast Cache'></form>"));
                     client.println(F("<form action='/' method='POST' style='flex-direction:row;justify-content:center;gap:10px;margin-top:10px;'>"));
                     client.println(F("<input type='hidden' name='action' value='togglePublic'>"));
                     client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
                     if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
                     if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
-                    
-                    // Public messaging toggle button logic
-                    if (publicMessagingLocked) {
-                        client.print(F("<input type='submit' value='Public Msgs Locked (Off)' disabled class='button-link disabled'>"));
-                    } else {
-                        client.print(F("<input type='submit' value='"));
-                        client.print(publicMessagingEnabled ? "Disable Public Msgs" : "Enable Public Msgs");
-                        client.println(F("'></form>"));
-                    }
-                    client.println(F("</div>")); // Close Admin Actions form-container
-                } else {
-                    // If session is active but node is not capable (password not set)
-                    client.println(F("<p class='feedback' style='color:orange;'>You are logged in, but this node is not yet configured to send messages. Please set an organizer password to enable sending messages. Alternatively, if the password has already been set on another node in the mesh, this node will eventually receive it and enable sending.</p>"));
-                }
-
-                // --- NEW: Security Log Section ---
-                client.println(F("<details style='margin-top:10px;'><summary style='font-size:1.1em;font-weight:bold;cursor:pointer;padding:5px 0;text-align:center;'>Security & Network Health</summary><div class='form-container' style='box-shadow:none;border:none;padding-top:5px; text-align: left;'>"));
+                    if (hideSystemView) client.println(F("<input type='hidden' name='hide_system' value='true'>"));
+                    if (publicMessagingLocked) { client.print(F("<input type='submit' value='Public Msgs Locked (Off)' disabled class='button-link disabled'>")); }
+                    else { client.print(F("<input type='submit' value='")); client.print(publicMessagingEnabled ? "Disable Public Msgs" : "Enable Public Msgs"); client.println(F("'></form>")); }
+                    client.println(F("</div>"));
+                } else { client.println(F("<p class='feedback' style='color:orange;'>You are logged in, but this node is not yet configured to send messages. Please set an organizer password to enable sending messages. Alternatively, if the password has already been set on another node in the mesh, this node will eventually receive it and enable sending.</p>")); }
+                
+                client.println(F("<details style='margin-top:10px;'><summary style='font-size:1.1em;font-weight:bold;cursor:pointer;padding:5px 0;text-align:center;'>Security & Password</summary><div class='form-container' style='box-shadow:none;border:none;padding-top:5px; text-align: left;'>"));
                 client.printf("<h3 style='text-align:left;'>Jamming Incidents (since first boot): %u</h3>", jammingIncidentCount);
                 client.printf("<h3 style='text-align:left;'>Checksum Failures (since first boot): %u</h3>", hashFailureCount);
+                client.printf("<h3 style='text-align:left;'>Infiltration Attempts (since first boot): %u</h3>", infiltrationIncidentCount);
                 if (hashFailureCount > 0) {
                     client.println(F("<h4>Recent Checksum Failure Log:</h4><ul style='font-size:0.8em; padding-left: 20px;'>"));
                     for (int i = 0; i < MAX_FAIL_LOG_ENTRIES; i++) {
-                        String key = "failMsg" + String(i);
-                        String logEntry = preferences.getString(key.c_str(), "");
-                        if (logEntry.length() > 0) {
-                            client.print(F("<li>"));
-                            client.print(escapeHtml(logEntry));
-                            client.println(F("</li>"));
-                        }
+                        String key = "failMsg" + String(i); String logEntry = preferences.getString(key.c_str(), "");
+                        if (logEntry.length() > 0) { client.print(F("<li>")); client.print(escapeHtml(logEntry)); client.println(F("</li>")); }
                     }
                     client.println(F("</ul>"));
                 }
+                if (infiltrationIncidentCount > 0) {
+                    client.println(F("<h4>Recent Infiltration Attempt Log (Sender MACs):</h4><ul style='font-size:0.8em; padding-left: 20px;'>"));
+                    for (int i = 0; i < MAX_INFIL_LOG_ENTRIES; i++) {
+                        String key = "infilMsg" + String(i); String logEntry = preferences.getString(key.c_str(), "");
+                        if (logEntry.length() > 0) { client.print(F("<li>")); client.print(escapeHtml(logEntry)); client.println(F("</li>")); }
+                    }
+                    client.println(F("</ul>"));
+                }
+
+                client.println(F("<hr style='margin: 15px 0;'><h3>Set/Reset Organizer Password:</h3>"));
+                if (passwordChangeLocked) {
+                    client.println(F("<p class='feedback' style='color:red; font-size:0.8em; margin-top:10px;'>The organizer password for this node cannot be changed after it has been set. To reset the password, you must reboot the board.</p>"));
+                } else {
+                    client.println(F("<form action='/' method='POST'><input type='hidden' name='action' value='setOrganizerPassword'>"));
+                    client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
+                    if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
+                    if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
+                    client.println(F("<label for='new_pass_input'>New Password:</label><input type='password' id='new_pass_input' name='new_password' required>"));
+                    client.println(F("<label for='confirm_new_pass_input'>Confirm New Password:</label><input type='password' id='confirm_new_pass_input' name='confirm_new_password' required>"));
+                    client.println(F("<input type='submit' value='Set New Password' class='button-link'></form>"));
+                    client.println(F("<p class='feedback' style='color:blue; font-size:0.8em; margin-top:10px;'>Setting a new password will distribute it to the mesh, replacing any existing password.</p>"));
+                }
                 client.println(F("</div></details>"));
 
-                // Always show Exit Organizer Mode button if logged in
                 client.println(F("<form action='/' method='POST' style='margin-top:10px;'><input type='hidden' name='action' value='exitOrganizer'>"));
                 client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
                 if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
                 if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
-                client.println(F("<input type='submit' value='Exit Organizer Mode' class='button-link secondary' style='background-color:#dc3545;'></form>"));
-
-                client.println(F("</div></details>")); // Close Organizer Controls details and form-container
-
-                // Password Management Section (Consolidated)
-                client.println(F("<details style='margin-top:10px;'><summary style='font-size:1.1em;font-weight:bold;cursor:pointer;padding:5px 0;text-align:center; outline: none; border: none; background-color:#007bff; color:white; border-radius:4px;'>Organizer Password Management</summary><div class='form-container' style='box-shadow:none;border:none;padding-top:5px;'>"));
-                client.println(F("<h3>Set/Reset Organizer Password:</h3>"));
-                
-                if (passwordChangeLocked) {
-                    client.println(F("<p class='feedback' style='color:red; font-size:0.8em; margin-top:10px;'>The organizer password for this node cannot be changed after it has been set. To reset the password, you must reboot the board.</p>"));
-                } else {
-                    client.println(F("<form action='/' method='POST'>"));
-                    client.println(F("<input type='hidden' name='action' value='setOrganizerPassword'>"));
-                    client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
-                    if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
-                    if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
-
-                    client.println(F("<label for='new_pass_input'>New Password:</label>"));
-                    client.println(F("<input type='password' id='new_pass_input' name='new_password' required>"));
-                    client.println(F("<label for='confirm_new_pass_input'>Confirm New Password:</label>"));
-                    client.println(F("<input type='password' id='confirm_new_pass_input' name='confirm_new_password' required>"));
-                    
-                    client.println(F("<input type='submit' value='Set New Password' class='button-link'>"));
-                    client.println(F("</form>"));
-                    client.println(F("<p class='feedback' style='color:blue; font-size:0.8em; margin-top:10px;'>Once the organizer password is set for this node, this option will be locked. To reset the password, you must reboot the board.</p>"));
-                }
+                if (hideSystemView) client.println(F("<input type='hidden' name='hide_system' value='true'>"));
+                client.println(F("<input type='submit' value='Exit Organizer Mode' class='button-link secondary' style='background-color:#dc3545; width: auto;'></form>"));
                 client.println(F("</div></details>"));
-
-            } else { // Not in organizer session (isOrganizerSessionActive is false)
-                // If passwordChangeLocked is false, prompt to set initial password
+            } else {
                 if (!passwordChangeLocked) {
+                    // If password isn't set yet, show the form to set it directly. NO LOGIN REQUIRED.
                     client.println(F("<details open><summary>Set Initial Organizer Password</summary><div class='form-container' style='box-shadow:none;border:none;padding-top:5px;'>"));
                     client.println(F("<h3>Set Your Organizer Password:</h3><form action='/' method='POST'><input type='hidden' name='action' value='setOrganizerPassword'>"));
                     if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
                     if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
                     client.println(F("<label for='new_pass_input'>New Password:</label><input type='password' id='new_pass_input' name='new_password' required>"));
                     client.println(F("<label for='confirm_new_pass_input'>Confirm New Password:</label><input type='password' id='confirm_new_pass_input' name='confirm_new_password' required>"));
-                    client.println(F("<input type='submit' value='Set Password' class='button-link' style='background-color:#007bff;'></form>"));
-                    client.println(F("<p class='feedback' style='color:blue; font-size:0.8em; margin-top:10px;'>Once the organizer password is set for this node, this option will be hidden and you will need to log in to change it.</p>")); // Restored explanation
+                    client.println(F("<input type='submit' value='Set Password' class='button-link' style='background-color:#007bff; width: auto;'></form>"));
+                    client.println(F("<p class='feedback' style='color:blue; font-size:0.8em; margin-top:10px;'>Set the mesh-wide password. After setting, you must log in with this password to access organizer functions.</p>"));
                     client.println(F("</div></details>"));
-                } else { // Password has been set, prompt to log in
+                } else {
+                    // If password IS set, then show the standard login form.
                     client.println(F("<details><summary>Enter Organizer Mode</summary><div class='form-container' style='box-shadow:none;border:none;padding-top:5px;'>"));
                     client.println(F("<form action='/' method='POST'><input type='hidden' name='action' value='enterOrganizer'>"));
                     if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
                     if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
                     client.println(F("<label for='pass_input'>Password:</label><input type='password' id='pass_input' name='password_plaintext_client' required>"));
-                    client.println(F("<input type='submit' value='Enter Mode'></form></div></details>"));
+                    client.println(F("<input type='submit' value='Enter Mode' style='width: auto;'></form></div></details>"));
                 }
-                
-                // Public message sending form (only if enabled AND node is capable)
-                if(publicMessagingEnabled && passwordChangeLocked) { 
+                if(publicMessagingEnabled && passwordChangeLocked) {
                     client.println(F("<details><summary>Send a Public Message</summary><div class='form-container' style='box-shadow:none;border:none;padding-top:5px;'>"));
                     client.println(F("<h3>Message (no password required):</h3><form action='/' method='POST'><input type='hidden' name='action' value='sendPublicMessage'>"));
                     if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
                     if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
                     client.printf(F("<label for='pub_msg_input'>Message:</label><input type='text' id='pub_msg_input' name='message' required maxlength='%d'>"), MAX_WEB_MESSAGE_INPUT_LENGTH);
-                    client.println(F("<input type='submit' value='Send Public Message'></form></div></details>"));
-                } else if (publicMessagingEnabled && !passwordChangeLocked) {
-                    client.println(F("<p class='feedback' style='color:orange;'>Public messaging is enabled, but this node is not yet configured to send messages. Please set an organizer password to enable sending messages. Alternatively, if the password has already been set on another node in the mesh, this node will eventually receive it and enable sending.</p>"));
-                }
+                    client.println(F("<input type='submit' value='Send Public Message' style='width: auto;'></form></div></details>"));
+                } else if (publicMessagingEnabled && !passwordChangeLocked) { client.println(F("<p class='feedback' style='color:orange;'>Public messaging is enabled, but this node is not yet configured to send messages. Please set an organizer password to enable sending messages. Alternatively, if the password has already been set on another node in the mesh, this node will eventually receive it and enable sending.</p>")); }
             }
-
             client.print(detectedNodesHtmlContent);
             client.println(F("</div></div></body></html>"));
             break;
           } else {
             if (currentLine.startsWith("GET")) {
-              isPost = false;
-              int pathStart = currentLine.indexOf(' ') + 1;
-              int pathEnd = currentLine.indexOf(' ', pathStart);
-              if (pathStart != -1 && pathEnd != -1 && pathEnd > pathStart) {
-                requestedPath = currentLine.substring(pathStart, pathEnd);
-              }
-            } else if (currentLine.startsWith("POST")) {
-              isPost = true;
-            }
+              isPost = false; int pathStart = currentLine.indexOf(' ') + 1; int pathEnd = currentLine.indexOf(' ', pathStart);
+              if (pathStart != -1 && pathEnd != -1 && pathEnd > pathStart) { requestedPath = currentLine.substring(pathStart, pathEnd); }
+            } else if (currentLine.startsWith("POST")) { isPost = true; }
             if (currentLine.startsWith("Content-Length: ")) {
               contentLength = currentLine.substring(16).toInt();
-              if (contentLength > MAX_POST_BODY_LENGTH) {
-                  Serial.printf("Error: Excessive Content-Length (%d). Closing connection to prevent DoS.\n", contentLength);
-                  client.stop();
-                  return;
-              }
+              if (contentLength > MAX_POST_BODY_LENGTH) { Serial.printf("Error: Excessive Content-Length (%d). Closing connection to prevent DoS.\n", contentLength); client.stop(); return; }
             }
             currentLine = "";
           }
-        } else if (c != '\r') {
-          currentLine += c;
-        }
+        } else if (c != '\r') { currentLine += c; }
       }
     }
     client.stop();
   }
 
-  // The userMessageBuffer is likely from a previous iteration or a placeholder.
-  // With the authentication model, messages should primarily originate from the web UI.
-  // Keeping this for now, but it would also need to respect passwordChangeLocked.
-  if (userMessageBuffer.length() > 0) {
-    String messageContent = userMessageBuffer;
-    uint8_t messageType = MSG_TYPE_PUBLIC; // Default to public if not set by organizer
-    if (messageContent.startsWith("Urgent: ")) {
-        totalUrgentMessages++;
-        messageType = MSG_TYPE_ORGANIZER; // Assuming urgent messages are from organizer
-    } else {
-        messageType = MSG_TYPE_PUBLIC;
-    }
-
-    // This part relies on createAndSendMessage's internal capability check
-    createAndSendMessage(messageContent.c_str(), messageContent.length(), messageType);
-    userMessageBuffer = "";
-  }
-
 #if USE_DISPLAY
-  // Dedicated display refresh logic
   if (millis() - lastDisplayRefresh >= DISPLAY_REFRESH_INTERVAL_MS) {
     lastDisplayRefresh = millis();
-    if (currentDisplayMode == MODE_CHAT_LOG) {
-      displayChatLogMode(TFT_CHAT_LOG_LINES);
-    } else if (currentDisplayMode == MODE_URGENT_ONLY) {
-      displayUrgentOnlyMode(TFT_URGENT_ONLY_LINES);
-    } else if (currentDisplayMode == MODE_DEVICE_INFO) {
-      displayDeviceInfoMode();
-    } else if (currentDisplayMode == MODE_STATS_INFO) {
-      displayStatsInfoMode();
-    }
+    if (currentDisplayMode == MODE_CHAT_LOG) { displayChatLogMode(TFT_CHAT_LOG_LINES); }
+    else if (currentDisplayMode == MODE_URGENT_ONLY) { displayUrgentOnlyMode(TFT_URGENT_ONLY_LINES); }
+    else if (currentDisplayMode == MODE_DEVICE_INFO) { displayDeviceInfoMode(); }
+    else if (currentDisplayMode == MODE_STATS_INFO) { displayStatsInfoMode(); }
   }
-
   if (digitalRead(TFT_TOUCH_IRQ_PIN) == LOW && (millis() - lastTouchTime > TOUCH_DEBOUNCE_MS)) {
-    lastTouchTime = millis();
-    Serial.println("Touch detected! Switching display mode.");
-
-    if (currentDisplayMode == MODE_CHAT_LOG) {
-      currentDisplayMode = MODE_URGENT_ONLY;
-      displayUrgentOnlyMode(TFT_URGENT_ONLY_LINES);
-    } else if (currentDisplayMode == MODE_URGENT_ONLY) {
-      currentDisplayMode = MODE_DEVICE_INFO;
-      displayDeviceInfoMode();
-    } else if (currentDisplayMode == MODE_DEVICE_INFO) {
-      currentDisplayMode = MODE_STATS_INFO;
-      displayStatsInfoMode();
-    }
-    else {
-      currentDisplayMode = MODE_CHAT_LOG;
-      displayChatLogMode(TFT_CHAT_LOG_LINES);
-    }
-    // Force a display refresh immediately after mode change
-    lastDisplayRefresh = 0; // Reset timer to trigger immediate refresh
+    lastTouchTime = millis(); if(VERBOSE_MODE) Serial.println("Touch detected! Switching display mode.");
+    if (currentDisplayMode == MODE_CHAT_LOG) { currentDisplayMode = MODE_URGENT_ONLY; displayUrgentOnlyMode(TFT_URGENT_ONLY_LINES); }
+    else if (currentDisplayMode == MODE_URGENT_ONLY) { currentDisplayMode = MODE_DEVICE_INFO; displayDeviceInfoMode(); }
+    else if (currentDisplayMode == MODE_DEVICE_INFO) { currentDisplayMode = MODE_STATS_INFO; displayStatsInfoMode(); }
+    else { currentDisplayMode = MODE_CHAT_LOG; displayChatLogMode(TFT_CHAT_LOG_LINES); }
+    lastDisplayRefresh = 0;
   }
 #endif
 }
 
 #if USE_DISPLAY
 void displayChatLogMode(int numLines) {
-  tft.fillScreen(TFT_BLACK);
-  tft.setCursor(0, 0);
-  tft.setTextColor(TFT_GREEN);      tft.print("MAC: "); tft.println(MAC_full_str);
-  tft.setTextColor(TFT_GREEN);     tft.print("IP: "); tft.println(IP.toString());
-  tft.setTextColor(TFT_GREEN);      tft.println("Mode: All Messages");
-  tft.setTextColor(TFT_WHITE);     tft.println("----------------------");
-  
+  tft.fillScreen(TFT_BLACK); tft.setCursor(0, 0);
+  tft.setTextColor(TFT_GREEN); tft.print("MAC: "); tft.println(MAC_full_str);
+  tft.setTextColor(TFT_GREEN); tft.print("IP: "); tft.println(IP.toString());
+  tft.setTextColor(TFT_GREEN); tft.println("Mode: All Messages");
+  tft.setTextColor(TFT_WHITE); tft.println("----------------------");
   portENTER_CRITICAL(&localDisplayLogMutex);
   int linesPrinted = 0;
-  // Iterate through localDisplayLog (which is sorted newest first)
   for (const auto& entry : localDisplayLog) {
     if (linesPrinted >= numLines) break;
-    const auto& msg = entry.message;
-    char formattedLine[256]; // Use a fixed-size buffer
-    const char* messageTypePrefix = "";
-
-    // Determine message type prefix
+    const auto& msg = entry.message; char formattedLine[256]; const char* messageTypePrefix = "";
     if (msg.messageType == MSG_TYPE_ORGANIZER) messageTypePrefix = "Organizer: ";
     else if (msg.messageType == MSG_TYPE_PUBLIC) messageTypePrefix = "Public: ";
     else if (msg.messageType == MSG_TYPE_COMMAND) messageTypePrefix = "Command: ";
     else if (msg.messageType == MSG_TYPE_AUTO_INIT) messageTypePrefix = "Auto: ";
-    
-    // Ensure password update messages are not displayed
-    if (msg.messageType == MSG_TYPE_PASSWORD_UPDATE) { 
-        continue; 
-    }
-
-    // Format the line using snprintf
-    snprintf(formattedLine, sizeof(formattedLine), "Node %s - %s%s", 
-             getMacSuffix(msg.originalSenderMac).c_str(), 
-             messageTypePrefix, 
-             msg.content);
-
+    if (msg.messageType == MSG_TYPE_PASSWORD_UPDATE) { continue; }
+    snprintf(formattedLine, sizeof(formattedLine), "Node %s - %s%s", getMacSuffix(msg.originalSenderMac).c_str(), messageTypePrefix, msg.content);
     tft.println(formattedLine);
     linesPrinted++;
   }
@@ -1928,27 +1573,20 @@ void displayChatLogMode(int numLines) {
 }
 
 void displayUrgentOnlyMode(int numLines) {
-  tft.fillScreen(TFT_BLACK);
-  tft.setCursor(0, 0);
-  tft.setTextColor(TFT_GREEN);      tft.print("MAC: "); tft.println(MAC_full_str);
-  tft.setTextColor(TFT_GREEN);     tft.print("IP: "); tft.println(IP.toString());
-  tft.setTextColor(TFT_GREEN);        tft.println("Mode: Urgent Only");
-  tft.setTextColor(TFT_WHITE);     tft.println("----------------------");
-
+  tft.fillScreen(TFT_BLACK); tft.setCursor(0, 0);
+  tft.setTextColor(TFT_GREEN); tft.print("MAC: "); tft.println(MAC_full_str);
+  tft.setTextColor(TFT_GREEN); tft.print("IP: "); tft.println(IP.toString());
+  tft.setTextColor(TFT_GREEN); tft.println("Mode: Urgent Only");
+  tft.setTextColor(TFT_WHITE); tft.println("----------------------");
   portENTER_CRITICAL(&localDisplayLogMutex);
   int linesPrinted = 0;
   for (const auto& entry : localDisplayLog) {
     if (linesPrinted >= numLines) break;
     const auto& msg = entry.message;
-    if (String(msg.content).indexOf("Urgent: ") != -1) { // Check content for "Urgent: " prefix
-        char formattedLine[256]; // Use a fixed-size buffer
-        const char* messageTypePrefix = "";
-        if (msg.messageType == MSG_TYPE_ORGANIZER) messageTypePrefix = "Organizer: "; // Still include type for display
-        
-        snprintf(formattedLine, sizeof(formattedLine), "Node %s - %s%s", 
-                 getMacSuffix(msg.originalSenderMac).c_str(), 
-                 messageTypePrefix, 
-                 msg.content);
+    if (String(msg.content).indexOf("Urgent: ") != -1) {
+        char formattedLine[256]; const char* messageTypePrefix = "";
+        if (msg.messageType == MSG_TYPE_ORGANIZER) messageTypePrefix = "Organizer: ";
+        snprintf(formattedLine, sizeof(formattedLine), "Node %s - %s%s", getMacSuffix(msg.originalSenderMac).c_str(), messageTypePrefix, msg.content);
         tft.println(formattedLine);
         linesPrinted++;
     }
@@ -1957,35 +1595,24 @@ void displayUrgentOnlyMode(int numLines) {
 }
 
 void displayDeviceInfoMode() {
-  tft.fillScreen(TFT_BLACK);
-  tft.setCursor(0, 0);
-  tft.setTextColor(TFT_GREEN);      tft.print("MAC: "); tft.println(MAC_full_str);
-  tft.setTextColor(TFT_GREEN);     tft.print("IP: "); tft.println(IP.toString());
-  tft.setTextColor(TFT_GREEN);      tft.println("Mode: Device Info");
-
-  tft.setTextColor(TFT_WHITE);     tft.println("----------------------");
+  tft.fillScreen(TFT_BLACK); tft.setCursor(0, 0);
+  tft.setTextColor(TFT_GREEN); tft.print("MAC: "); tft.println(MAC_full_str);
+  tft.setTextColor(TFT_GREEN); tft.print("IP: "); tft.println(IP.toString());
+  tft.setTextColor(TFT_GREEN); tft.println("Mode: Device Info");
+  tft.setTextColor(TFT_WHITE); tft.println("----------------------");
   tft.println("Nearby Nodes (Last Seen):");
-
-  portENTER_CRITICAL(&lastSeenPeersMutex); // Use the lastSeenPeers for display
+  portENTER_CRITICAL(&lastSeenPeersMutex);
   std::vector<std::pair<String, unsigned long>> sortedSeenPeers;
   for (auto const& [macStr, timestamp] : lastSeenPeers) { sortedSeenPeers.push_back({macStr, timestamp}); }
   std::sort(sortedSeenPeers.begin(), sortedSeenPeers.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
-
   int linesPrinted = 0;
-  if (sortedSeenPeers.empty()) {
-    tft.println("  No other nodes detected yet.");
-  } else {
+  if (sortedSeenPeers.empty()) { tft.println("  No other nodes detected yet."); }
+  else {
     for (const auto& macPair : sortedSeenPeers) {
         if (linesPrinted >= MAX_NODES_TO_DISPLAY_TFT) break;
-        uint8_t macBytes[6];
-        unsigned int tempMac[6]; // Temporary array for sscanf
-        sscanf(macPair.first.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X",
-               &tempMac[0], &tempMac[1], &tempMac[2], &tempMac[3], &tempMac[4], &tempMac[5]);
-        // Copy values from temporary unsigned int array to uint8_t array
-        for (int k = 0; k < 6; ++k) {
-            macBytes[k] = (uint8_t)tempMac[k];
-        }
-
+        uint8_t macBytes[6]; unsigned int tempMac[6];
+        sscanf(macPair.first.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", &tempMac[0], &tempMac[1], &tempMac[2], &tempMac[3], &tempMac[4], &tempMac[5]);
+        for (int k = 0; k < 6; ++k) { macBytes[k] = (uint8_t)tempMac[k]; }
         tft.printf("  %s (seen %lu s ago)\n", formatMaskedMac(macBytes).c_str(), (millis() - macPair.second) / 1000);
         linesPrinted++;
     }
@@ -1994,44 +1621,34 @@ void displayDeviceInfoMode() {
 }
 
 void displayStatsInfoMode() {
-  tft.fillScreen(TFT_BLACK);
-  tft.setCursor(0, 0);
-  tft.setTextColor(TFT_GREEN);      tft.print("MAC: "); tft.println(MAC_full_str);
-  tft.setTextColor(TFT_GREEN);     tft.print("IP: "); tft.println(IP.toString());
-  tft.setTextColor(TFT_GREEN);      tft.println("Mode: Stats Info");
-  tft.setTextColor(TFT_WHITE);     tft.println("----------------------");
-
-  unsigned long uptimeMillis = millis();
-  unsigned long seconds = uptimeMillis / 1000;
-  unsigned long minutes = seconds / 60;
-  unsigned long hours = minutes / 60;
-  unsigned long days = hours / 24;
+  tft.fillScreen(TFT_BLACK); tft.setCursor(0, 0);
+  tft.setTextColor(TFT_GREEN); tft.print("MAC: "); tft.println(MAC_full_str);
+  tft.setTextColor(TFT_GREEN); tft.print("IP: "); tft.println(IP.toString());
+  tft.setTextColor(TFT_GREEN); tft.println("Mode: Stats Info");
+  tft.setTextColor(TFT_WHITE); tft.println("----------------------");
+  unsigned long uptimeMillis = millis(), seconds = uptimeMillis / 1000, minutes = seconds / 60, hours = minutes / 60, days = hours / 24;
   seconds %= 60; minutes %= 60; hours %= 24;
-
   tft.println("Uptime:");
   tft.printf("  Days: %lu, H: %lu, M: %lu, S: %lu\n", days, hours, minutes, seconds);
-
   tft.println("Message Stats:");
   tft.printf("  Total Sent: %lu\n", totalMessagesSent);
   tft.printf("  Total Received: %lu\n", totalMessagesReceived);
   tft.printf("  Urgent Messages: %lu\n", totalUrgentMessages);
   tft.printf("  Cache Size: %u/%u\n", seenMessages.size(), MAX_CACHE_SIZE);
-
   tft.println("Mode Status:");
   tft.printf("  Public Msgs: %s\n", publicMessagingEnabled ? "ENABLED" : "DISABLED");
   tft.printf("  Public Lock: %s\n", publicMessagingLocked ? "LOCKED" : "UNLOCKED");
   tft.printf("  Node Capable: %s\n", passwordChangeLocked ? "YES" : "NO");
-  
-  // Display the unique AP client count
   portENTER_CRITICAL(&apClientsMutex);
   int uniqueClients = apConnectedClients.size();
   portEXIT_CRITICAL(&apClientsMutex);
   tft.println("AP Stats:");
   tft.printf("  Unique Clients: %d\n", uniqueClients);
-
   tft.println("Network Security:");
   tft.printf("  Jamming Incidents: %u\n", jammingIncidentCount);
   tft.printf("  Checksum Failures: %u\n", hashFailureCount);
+  tft.printf("  Infiltration Attempts: %u\n", infiltrationIncidentCount);
   tft.printf("  Current Jamming: %s\n", (lastJammingEventTimestamp > 0) ? "YES" : "NO");
+  tft.printf("  Infiltration Alert: %s\n", isInfiltrationAlert ? "YES" : "NO");
 }
 #endif
