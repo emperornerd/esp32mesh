@@ -11,6 +11,9 @@
 #include <esp_mac.h>    // Corrected: Added .h for esp_mac
 #include <freertos/FreeRTOS.h> // Explicitly include FreeRTOS for queue types
 #include <freertos/queue.h>    // Explicitly include queue definitions
+#include <Preferences.h> // For storing data in non-volatile storage (NVS)
+#include "mbedtls/sha256.h" // For secure hashing with SHA-256
+#include "mbedtls/aes.h"    // For AES encryption
 
 #define USE_DISPLAY true
 
@@ -30,11 +33,10 @@ const IPAddress AP_IP(192, 168, 4, 1);
 const IPAddress NET_MASK(255, 255, 255, 0);
 
 // --- Message & Protocol Constants ---
-// Maximum content length for the message, allowing for null terminator after decryption.
-// The total message size is 250 bytes. With the addition of a 2-byte checksum,
-// the content length is reduced from 238 to 236 bytes.
-// Total message size: 4 (ID) + 6 (MAC) + 1 (TTL) + 1 (Type) + 2 (Checksum) + 236 (content array) = 250 bytes.
-#define MAX_MESSAGE_CONTENT_LEN 236 // Max actual content length (reduced for checksum)
+// Maximum content length for the message. Must be a multiple of 16 for AES block cipher.
+// The total message size is 250 bytes.
+// Total message size: 4 (ID) + 6 (MAC) + 1 (TTL) + 1 (Type) + 2 (Checksum) + 224 (content array) = 238 bytes.
+#define MAX_MESSAGE_CONTENT_LEN 224 // Max content length, adjusted for AES-128 block size (16 bytes)
 #define MAX_TTL_HOPS 40 // Maximum Time-To-Live (hops) for a message
 
 // Message types for display prioritization
@@ -47,6 +49,7 @@ const IPAddress NET_MASK(255, 255, 255, 0);
 #define MSG_TYPE_PASSWORD_UPDATE 6 // Message type for password updates
 #define MSG_TYPE_STATUS_REQUEST 7 // Request public enable/disable status
 #define MSG_TYPE_STATUS_RESPONSE 8 // Respond with public enable/disable status
+#define MSG_TYPE_JAMMING_ALERT 9 // Message type for jamming alerts
 
 // Command prefixes
 const char* CMD_PREFIX = "CMD::";
@@ -99,15 +102,24 @@ unsigned long lockoutTime = 0;
 const int MAX_LOGIN_ATTEMPTS = 20;
 const unsigned long LOCKOUT_DURATION_MS = 300000; // 5 minutes
 
-// Challenge-response authentication variables
-String currentChallengeNonce = "";
-unsigned long challengeNonceTimestamp = 0;
-const unsigned long CHALLENGE_TIMEOUT_MS = 120000; // Increased to 120 seconds (2 minutes) for nonce validity
-
 // --- Statistics Variables ---
 unsigned long totalMessagesSent = 0;
 unsigned long totalMessagesReceived = 0;
 unsigned long totalUrgentMessages = 0;
+
+// --- Jamming Detection & Security Logging Variables ---
+Preferences preferences; // NVS object for permanent storage
+const unsigned long JAMMING_DETECTION_THRESHOLD_MS = 60000; // 60 seconds of no messages from known peers
+const unsigned long JAMMING_ALERT_COOLDOWN_MS = 60000;     // Send alerts at most once per minute
+const unsigned long JAMMING_MEMORY_RESET_MS = 300000;      // Reset long-term memory after 5 minutes of normal operation
+unsigned long lastMessageReceivedTimestamp = 0; // Timestamp of the last received message
+bool isCurrentlyJammed = false; // Current status of jamming detection
+unsigned long lastJammingEventTimestamp = 0; // "Long-term memory" for jamming, 0 = never detected
+unsigned long lastJammingAlertSent = 0;      // To manage alert cooldown
+unsigned long communicationRestoredTimestamp = 0; // Timestamp for when communication was restored
+uint32_t jammingIncidentCount = 0; // Counter for jamming incidents (persisted in NVS)
+uint32_t hashFailureCount = 0; // Counter for hash/checksum failures (persisted in NVS)
+const int MAX_FAIL_LOG_ENTRIES = 3; // Store last 3 hash failure examples in NVS
 
 // --- Timing & Interval Constants ---
 unsigned long lastRebroadcast = 0; // Timestamp for last re-broadcast
@@ -131,42 +143,49 @@ DNSServer dnsServer;
 
 // Define a Pre-Shared Key (PSK) for symmetric encryption
 // This key must be identical on all participating nodes.
-// For simplicity and to meet "fully embedded", it's hardcoded.
-// In a real-world scenario, this would be provisioned securely.
+// MUST be 16 bytes (128 bits) for AES-128.
 const uint8_t PRE_SHARED_KEY[] = {
   0x1A, 0x2B, 0x3C, 0x4D, 0x5E, 0x6F, 0x70, 0x81,
   0x92, 0xA3, 0xB4, 0xC5, 0xD6, 0xE7, 0xF8, 0x09
 };
 const size_t PRE_SHARED_KEY_LEN = sizeof(PRE_SHARED_KEY);
 
-// Simple PRNG state for the stream cipher
-uint32_t prng_state;
+// --- START: AES-ECB Encryption/Decryption ---
+// NOTE: ECB mode is not recommended for most applications as it is not semantically
+// secure. However, implementing as requested for simplicity.
+// This function encrypts data in-place using AES-128 ECB mode.
+void aesEcbEncrypt(uint8_t* data, size_t dataLen) {
+    mbedtls_aes_context aes;
+    mbedtls_aes_init(&aes);
 
-// Function to seed the PRNG
-void seedPrng(const uint8_t* key, size_t keyLen) {
-    prng_state = 0;
-    for (size_t i = 0; i < keyLen; ++i) {
-        prng_state = (prng_state << 8) | key[i]; // Combine key bytes into seed
+    // Set the encryption key (128 bits)
+    mbedtls_aes_setkey_enc(&aes, PRE_SHARED_KEY, 128);
+
+    // Encrypt block by block (16 bytes at a time)
+    for (size_t i = 0; i < dataLen; i += 16) {
+        mbedtls_aes_crypt_ecb(&aes, MBEDTLS_AES_ENCRYPT, data + i, data + i);
     }
-    if (prng_state == 0) prng_state = 1; // Avoid zero seed
+
+    mbedtls_aes_free(&aes);
 }
 
-// Function to get next PRNG byte
-uint8_t getPrngByte() {
-    // Simple Linear Congruential Generator (LCG) parameters
-    // These are NOT cryptographically secure, but provide a different stream.
-    prng_state = (1103515245 * prng_state + 12345); 
-    return (uint8_t)(prng_state >> 24); // Take higher bits for better distribution
-}
+// This function decrypts data in-place using AES-128 ECB mode.
+void aesEcbDecrypt(uint8_t* data, size_t dataLen) {
+    mbedtls_aes_context aes;
+    mbedtls_aes_init(&aes);
 
-// Stream cipher encryption/decryption using PRNG
-// This function performs XOR operation with a PRNG-generated keystream in-place.
-void prngStreamCipher(uint8_t* data, size_t dataLen, const uint8_t* key, size_t keyLen) {
-    seedPrng(key, keyLen); // Seed PRNG for each operation to ensure determinism
-    for (size_t i = 0; i < dataLen; i++) {
-        data[i] = data[i] ^ getPrngByte();
+    // Set the decryption key (128 bits)
+    mbedtls_aes_setkey_dec(&aes, PRE_SHARED_KEY, 128);
+
+    // Decrypt block by block (16 bytes at a time)
+    for (size_t i = 0; i < dataLen; i += 16) {
+        mbedtls_aes_crypt_ecb(&aes, MBEDTLS_AES_DECRYPT, data + i, data + i);
     }
+
+    mbedtls_aes_free(&aes);
 }
+// --- END: AES-ECB Encryption/Decryption ---
+
 
 // Function to calculate a simple checksum (sum of bytes)
 uint16_t calculateChecksum(const char* data, size_t len) {
@@ -202,8 +221,19 @@ typedef struct {
     unsigned long timestamp;       // Timestamp of reception
 } IsrQueueMessage;
 
+// Define a struct for logging security events to NVS from the main loop
+typedef struct {
+    uint8_t senderMac[6];
+    uint32_t messageID;
+    // type can be 0 for hash failure, etc.
+    int type; 
+} NvsQueueItem;
+
 QueueHandle_t messageQueue;
+QueueHandle_t nvsQueue;
 const size_t QUEUE_SIZE = 10; // Size of the message queue
+const size_t NVS_QUEUE_SIZE = 5; // Size of the NVS logging queue
+
 
 // Struct to hold messages for local display, including timestamp for sorting
 struct LocalDisplayEntry {
@@ -214,7 +244,7 @@ std::vector<LocalDisplayEntry> localDisplayLog;
 portMUX_TYPE localDisplayLogMutex = portMUX_INITIALIZER_UNLOCKED; // Corrected initialization
 const size_t MAX_LOCAL_DISPLAY_LOG_SIZE = 50; // Max number of messages to keep in local display log
 const size_t NUM_ORGANIZER_MESSAGES_TO_RETAIN = 5; // Number of most recent organizer messages to always keep
-const size_t MAX_WEB_MESSAGE_INPUT_LENGTH = 226; // Max length for message input in HTML
+const size_t MAX_WEB_MESSAGE_INPUT_LENGTH = 214; // Max length for message input in HTML (adjusted for smaller buffer)
 const size_t MAX_POST_BODY_LENGTH = 2048; // Max content length for POST requests
 
 // Map to store MACs of all peers from which messages have been received (for display and peer management)
@@ -251,20 +281,35 @@ void displayDeviceInfoMode();
 void displayStatsInfoMode();
 #endif
 
-// A simple non-cryptographic hash function (DJB2 variant) with a pseudo-salt
+// A secure SHA-256 hash function with a pseudo-salt.
 String simpleHash(const String& input) {
-    // A hardcoded pseudo-salt. This is NOT a true cryptographic salt
-    // as it's fixed and known. Its purpose is to make rainbow table attacks
-    // against the *default* password slightly harder, as the hash will be
-    // different from a standard DJB2 hash of "password".
+    // A hardcoded pseudo-salt. Its purpose is to ensure the hash is unique to this application,
+    // even for common inputs. It is not a per-user salt.
     const String PSEUDO_SALT = "ProtestNodeSalt123XYZ"; 
-    String saltedInput = input + PSEUDO_SALT; // Concatenate input with pseudo-salt
+    String saltedInput = input + PSEUDO_SALT;
 
-    unsigned long hash = 5381; // Initial value (DJB2 seed)
-    for (int i = 0; i < saltedInput.length(); i++) {
-        hash = ((hash << 5) + hash) + saltedInput.charAt(i); // hash * 33 + c
+    // Output buffer for the 32-byte SHA-256 hash
+    unsigned char hashOutput[32];
+    
+    // mbedtls context
+    mbedtls_sha256_context ctx;
+
+    // Perform the hash
+    mbedtls_sha256_init(&ctx);
+    mbedtls_sha256_starts(&ctx, 0); // 0 for SHA-256
+    mbedtls_sha256_update(&ctx, (const unsigned char*)saltedInput.c_str(), saltedInput.length());
+    mbedtls_sha256_finish(&ctx, hashOutput);
+    mbedtls_sha256_free(&ctx);
+
+    // Convert the binary hash to a hex string
+    String hashString = "";
+    for(int i = 0; i < sizeof(hashOutput); i++){
+        char hex[3];
+        sprintf(hex, "%02x", hashOutput[i]);
+        hashString += hex;
     }
-    return String(hash, HEX); // Return as hex string
+    
+    return hashString;
 }
 
 
@@ -408,8 +453,7 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
   qMsg.timestamp = millis(); // Timestamp when received by ISR
 
   // Decrypt the content in ISR before checksum and other checks
-  // This is safe because it's an in-place XOR operation on a fixed-size buffer.
-  prngStreamCipher((uint8_t*)qMsg.messageData.content, MAX_MESSAGE_CONTENT_LEN, PRE_SHARED_KEY, PRE_SHARED_KEY_LEN);
+  aesEcbDecrypt((uint8_t*)qMsg.messageData.content, MAX_MESSAGE_CONTENT_LEN);
   qMsg.messageData.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0'; // Ensure null termination after decryption
 
   // Calculate checksum on the decrypted content in ISR
@@ -417,7 +461,12 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
 
   // Check if the calculated checksum matches the received checksum
   if (calculatedChecksum != qMsg.messageData.checksum) {
-      // Checksum mismatch! Dropping message.
+      // Checksum mismatch! Queue for logging in main loop.
+      NvsQueueItem nvsItem;
+      memcpy(nvsItem.senderMac, recvInfo->src_addr, 6);
+      nvsItem.messageID = qMsg.messageData.messageID;
+      nvsItem.type = 0; // 0 for hash failure
+      xQueueSendFromISR(nvsQueue, &nvsItem, 0);
       return; // Drop the message if checksum verification fails
   }
 
@@ -492,13 +541,13 @@ void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len,
   newMessage.checksum = calculateChecksum(newMessage.content, strlen(newMessage.content));
 
   // Encrypt the message content before sending
-  prngStreamCipher((uint8_t*)newMessage.content, MAX_MESSAGE_CONTENT_LEN, PRE_SHARED_KEY, PRE_SHARED_KEY_LEN);
+  aesEcbEncrypt((uint8_t*)newMessage.content, MAX_MESSAGE_CONTENT_LEN);
 
   if (targetMac != nullptr) {
       // Unicast message
       esp_now_send(targetMac, (uint8_t*)&newMessage, sizeof(esp_now_message_t));
       Serial.printf("Sent unicast message (Type: %d, ID: %u) to %02X:%02X:%02X:%02X:%02X:%02X\n",
-                    type, newMessage.messageID, MAC2STR(targetMac));
+                    type, newMessage.messageID, targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5]);
   } else {
       // Broadcast message (sendToAllPeers will decrement TTL on 'newMessage' directly)
       sendToAllPeers(newMessage);
@@ -508,7 +557,7 @@ void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len,
   // Special handling for discovery messages: DO NOT add to cache or local display log
   // Password updates (MSG_TYPE_PASSWORD_UPDATE) are intended to be cached.
   // Status requests/responses should also not be added to display log
-  if (type == MSG_TYPE_DISCOVERY || type == MSG_TYPE_STATUS_REQUEST || type == MSG_TYPE_STATUS_RESPONSE) { 
+  if (type == MSG_TYPE_DISCOVERY || type == MSG_TYPE_STATUS_REQUEST || type == MSG_TYPE_STATUS_RESPONSE || type == MSG_TYPE_JAMMING_ALERT) { 
       return; // Do not proceed further for these message types
   }
 
@@ -523,7 +572,7 @@ void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len,
   // Create a copy to decrypt for local display without altering the 'newMessage' that was sent.
   esp_now_message_t displayMessage = newMessage;
   // The checksum is already part of displayMessage, no need to recalculate for display.
-  prngStreamCipher((uint8_t*)displayMessage.content, MAX_MESSAGE_CONTENT_LEN, PRE_SHARED_KEY, PRE_SHARED_KEY_LEN); // Decrypt for display
+  aesEcbDecrypt((uint8_t*)displayMessage.content, MAX_MESSAGE_CONTENT_LEN); // Decrypt for display
   displayMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0'; // Ensure null termination
   LocalDisplayEntry newEntry = {displayMessage, millis()}; // Store message and its creation timestamp
   localDisplayLog.push_back(newEntry);
@@ -598,12 +647,25 @@ void setup() {
   publicMessagingLocked = false; // Initialize public messaging lock status as unlocked
   passwordChangeLocked = false; // Initialize password change lock status (node not capable)
   isOrganizerSessionActive = false; // Initialize web session as inactive
+  lastMessageReceivedTimestamp = millis(); // Initialize to prevent false positive on boot
 
-  messageQueue = xQueueCreate(QUEUE_SIZE, sizeof(IsrQueueMessage)); // Changed queue type to IsrQueueMessage
+  messageQueue = xQueueCreate(QUEUE_SIZE, sizeof(IsrQueueMessage));
   if (messageQueue == NULL) {
     Serial.println("Failed to create message queue!");
     while(true) { delay(100); }
   }
+
+  nvsQueue = xQueueCreate(NVS_QUEUE_SIZE, sizeof(NvsQueueItem));
+  if (nvsQueue == NULL) {
+    Serial.println("Failed to create NVS queue!");
+    while(true) { delay(100); }
+  }
+
+  // Initialize preferences and load persisted security data
+  preferences.begin("protest-node", false); // false = read/write mode
+  jammingIncidentCount = preferences.getUInt("jamCount", 0);
+  hashFailureCount = preferences.getUInt("hashFailCount", 0);
+  Serial.printf("Loaded from NVS -> Jamming Incidents: %u, Hash Failures: %u\n", jammingIncidentCount, hashFailureCount);
 
   // Calculate the hash of the WEB_PASSWORD at startup using the simple hash
   hashedOrganizerPassword = simpleHash(WEB_PASSWORD);
@@ -704,9 +766,44 @@ String buildQueryString(const String& sessionToken, bool showPublic, bool showUr
 void loop() {
   dnsServer.processNextRequest();
 
+  // --- Process Security Event Queue for NVS Logging ---
+  NvsQueueItem nvsItem;
+  while (xQueueReceive(nvsQueue, &nvsItem, 0) == pdPASS) {
+      if (nvsItem.type == 0) { // Hash failure
+          hashFailureCount++;
+          preferences.putUInt("hashFailCount", hashFailureCount);
+
+          // Get the current index for the circular log buffer in NVS
+          uint8_t failLogIndex = preferences.getUChar("failLogIdx", 0);
+          
+          // Format the log entry string
+          String logData = formatMac(nvsItem.senderMac) + " | ID: " + String(nvsItem.messageID);
+          String key = "failMsg" + String(failLogIndex);
+          
+          // Store the log entry
+          preferences.putString(key.c_str(), logData);
+          
+          // Increment and wrap the index for the next entry
+          failLogIndex = (failLogIndex + 1) % MAX_FAIL_LOG_ENTRIES;
+          preferences.putUChar("failLogIdx", failLogIndex);
+          
+          Serial.printf("Logged hash failure from %s. Total failures: %u\n", formatMac(nvsItem.senderMac).c_str(), hashFailureCount);
+      }
+  }
+
+
   IsrQueueMessage qMsg;
   bool messageProcessed = false;
   while (xQueueReceive(messageQueue, &qMsg, 0) == pdPASS) {
+    // A valid message was received. Update timestamp and check if jamming has stopped.
+    lastMessageReceivedTimestamp = millis();
+    if (isCurrentlyJammed) {
+        isCurrentlyJammed = false; // Communication restored
+        communicationRestoredTimestamp = millis(); // Start timer to reset long-term memory
+        Serial.println("Communication restored. Jamming appears to have stopped.");
+        addDisplayLog("Communication restored.");
+    }
+    
     // Process the message received from the ISR queue
     esp_now_message_t incomingMessage = qMsg.messageData; // Copy data from queue struct
     uint8_t* recvInfoSrcAddr = qMsg.senderMac; // Get sender MAC from queue struct
@@ -745,6 +842,23 @@ void loop() {
         continue; // Stop processing this message further (silently handled)
     }
 
+    // Handle MSG_TYPE_JAMMING_ALERT: Update status, cache it, but don't display or re-broadcast
+    if (incomingMessage.messageType == MSG_TYPE_JAMMING_ALERT) {
+        if (lastJammingEventTimestamp == 0) { // If we haven't detected it ourselves yet
+            Serial.println("Received JAMMING_ALERT from a peer. Updating local status.");
+            lastJammingEventTimestamp = millis(); // Set our long-term memory
+            // Log this as a new incident if received from a peer
+            jammingIncidentCount++;
+            preferences.putUInt("jamCount", jammingIncidentCount);
+        }
+        // Re-encrypt before caching to ensure it's stored correctly
+        esp_now_message_t encryptedForCache = incomingMessage;
+        aesEcbEncrypt((uint8_t*)encryptedForCache.content, MAX_MESSAGE_CONTENT_LEN);
+        addOrUpdateMessageToSeen(encryptedForCache.messageID, encryptedForCache.originalSenderMac, encryptedForCache);
+        continue; // Stop further processing of this alert message
+    }
+
+
     // Check if the message has been seen before by THIS node (for display deduplication).
     bool wasAlreadySeen = isMessageSeen(incomingMessage.messageID, incomingMessage.originalSenderMac);
 
@@ -752,26 +866,16 @@ void loop() {
 
     // Handle MSG_TYPE_STATUS_REQUEST
     if (incomingMessage.messageType == MSG_TYPE_STATUS_REQUEST) {
-        Serial.printf("Received STATUS_REQUEST from %02X:%02X:%02X:%02X:%02X:%02X. Replying with status.\n", MAC2STR(incomingMessage.originalSenderMac));
+        Serial.printf("Received STATUS_REQUEST from %02X:%02X:%02X:%02X:%02X:%02X. Replying with status.\n", recvInfoSrcAddr[0], recvInfoSrcAddr[1], recvInfoSrcAddr[2], recvInfoSrcAddr[3], recvInfoSrcAddr[4], recvInfoSrcAddr[5]);
         
-        esp_now_message_t outgoingStatusResponse;
-        memset(&outgoingStatusResponse, 0, sizeof(outgoingStatusResponse));
-        outgoingStatusResponse.messageType = MSG_TYPE_STATUS_RESPONSE;
-        memcpy(outgoingStatusResponse.originalSenderMac, ourMacBytes, 6); // Our MAC as sender
-        outgoingStatusResponse.messageID = esp_random();
-        outgoingStatusResponse.ttl = MAX_TTL_HOPS;
-        // Content includes both publicMessagingEnabled and publicMessagingLocked status
-        outgoingStatusResponse.content[0] = publicMessagingEnabled ? '1' : '0'; // '1' for enabled, '0' for disabled
-        outgoingStatusResponse.content[1] = publicMessagingLocked ? '1' : '0'; // '1' for locked, '0' for unlocked
-        outgoingStatusResponse.content[2] = '\0';
-        outgoingStatusResponse.checksum = calculateChecksum(outgoingStatusResponse.content, strlen(outgoingStatusResponse.content));
+        char responseContent[3];
+        responseContent[0] = publicMessagingEnabled ? '1' : '0';
+        responseContent[1] = publicMessagingLocked ? '1' : '0';
+        responseContent[2] = '\0';
         
-        // Encrypt content before sending
-        prngStreamCipher((uint8_t*)outgoingStatusResponse.content, MAX_MESSAGE_CONTENT_LEN, PRE_SHARED_KEY, PRE_SHARED_KEY_LEN);
-        
-        createAndSendMessage("", 0, MSG_TYPE_STATUS_RESPONSE, incomingMessage.originalSenderMac); // Send unicast back to sender
+        createAndSendMessage(responseContent, strlen(responseContent), MSG_TYPE_STATUS_RESPONSE, incomingMessage.originalSenderMac);
         Serial.printf("Sent STATUS_RESPONSE (publicEnabled=%s, publicLocked=%s) to %02X:%02X:%02X:%02X:%02X:%02X\n",
-                      publicMessagingEnabled ? "true" : "false", publicMessagingLocked ? "true" : "false", MAC2STR(incomingMessage.originalSenderMac));
+                      publicMessagingEnabled ? "true" : "false", publicMessagingLocked ? "true" : "false", incomingMessage.originalSenderMac[0], incomingMessage.originalSenderMac[1], incomingMessage.originalSenderMac[2], incomingMessage.originalSenderMac[3], incomingMessage.originalSenderMac[4], incomingMessage.originalSenderMac[5]);
         continue; // Do not process this message further (no display, no re-broadcast)
     }
 
@@ -780,7 +884,7 @@ void loop() {
         bool peerPublicStatus = (incomingMessage.content[0] == '1'); // Content is '1' or '0'
         bool peerPublicLockedStatus = (incomingMessage.content[1] == '1'); // Content is '1' or '0'
         Serial.printf("Received STATUS_RESPONSE from %02X:%02X:%02X:%02X:%02X:%02X. Peer Public Enabled: %s, Peer Public Locked: %s\n",
-                      MAC2STR(incomingMessage.originalSenderMac), peerPublicStatus ? "true" : "false", peerPublicLockedStatus ? "true" : "false");
+                      incomingMessage.originalSenderMac[0], incomingMessage.originalSenderMac[1], incomingMessage.originalSenderMac[2], incomingMessage.originalSenderMac[3], incomingMessage.originalSenderMac[4], incomingMessage.originalSenderMac[5], peerPublicStatus ? "true" : "false", peerPublicLockedStatus ? "true" : "false");
         addDisplayLog(String("Peer ") + getMacSuffix(incomingMessage.originalSenderMac) + " Public Status: " + (peerPublicStatus ? "ENABLED" : "DISABLED") + ", Locked: " + (peerPublicLockedStatus ? "YES" : "NO"));
         // Match the public messaging status to the sender's status
         // Only update if our current status is different and not locked
@@ -815,7 +919,7 @@ void loop() {
 
             // If a node receives an OTA password update and accepts it,
             // it immediately requests the sender's public status.
-            Serial.printf("Password updated via OTA. Requesting public status from sender %02X:%02X:%02X:%02X:%02X:%02X\n", MAC2STR(incomingMessage.originalSenderMac));
+            Serial.printf("Password updated via OTA. Requesting public status from sender %02X:%02X:%02X:%02X:%02X:%02X\n", incomingMessage.originalSenderMac[0], incomingMessage.originalSenderMac[1], incomingMessage.originalSenderMac[2], incomingMessage.originalSenderMac[3], incomingMessage.originalSenderMac[4], incomingMessage.originalSenderMac[5]);
             createAndSendMessage("", 0, MSG_TYPE_STATUS_REQUEST, incomingMessage.originalSenderMac); // Send unicast status request
         }
         skipDisplayLog = true; // Always skip display for password updates
@@ -826,7 +930,7 @@ void loop() {
     // To do this, we re-encrypt the incomingMessage before passing it to the cache.
     // NOTE: incomingMessage.content is currently DECRYPTED here.
     esp_now_message_t encryptedForCache = incomingMessage; // Create a copy
-    prngStreamCipher((uint8_t*)encryptedForCache.content, MAX_MESSAGE_CONTENT_LEN, PRE_SHARED_KEY, PRE_SHARED_KEY_LEN); // Re-encrypt for cache
+    aesEcbEncrypt((uint8_t*)encryptedForCache.content, MAX_MESSAGE_CONTENT_LEN); // Re-encrypt for cache
     addOrUpdateMessageToSeen(encryptedForCache.messageID, encryptedForCache.originalSenderMac, encryptedForCache);
 
 
@@ -853,7 +957,7 @@ void loop() {
         // We also need to respect its current TTL.
         if (incomingMessage.ttl > 0) {
             esp_now_message_t encryptedForRebroadcast = incomingMessage; // Create a copy
-            prngStreamCipher((uint8_t*)encryptedForRebroadcast.content, MAX_MESSAGE_CONTENT_LEN, PRE_SHARED_KEY, PRE_SHARED_KEY_LEN); // Encrypt for re-broadcast
+            aesEcbEncrypt((uint8_t*)encryptedForRebroadcast.content, MAX_MESSAGE_CONTENT_LEN); // Encrypt for re-broadcast
             sendToAllPeers(encryptedForRebroadcast);
         } else {
             Serial.println("Message reached TTL limit, not re-broadcasting.");
@@ -889,6 +993,49 @@ void loop() {
     Serial.println("Message processed from queue: Node " + originalSenderMacSuffix + " - " + incomingContent);
     messageProcessed = true;
   }
+
+  // --- Jamming Detection Logic ---
+  bool hasPeers = false;
+  portENTER_CRITICAL(&lastSeenPeersMutex);
+  // A node is considered "alone" if it only knows about the broadcast MAC address.
+  // If size > 1, it has seen at least one other peer.
+  hasPeers = lastSeenPeers.size() > 1;
+  portEXIT_CRITICAL(&lastSeenPeersMutex);
+
+  // Jamming is only detected if we have seen peers but then stopped hearing from them.
+  if (hasPeers && !isCurrentlyJammed && (millis() - lastMessageReceivedTimestamp > JAMMING_DETECTION_THRESHOLD_MS)) {
+      Serial.println("Jamming detected: No messages received from known peers for threshold duration.");
+      isCurrentlyJammed = true;
+
+      // This is a new incident, log it to permanent memory
+      if (lastJammingEventTimestamp == 0) {
+          lastJammingEventTimestamp = millis(); // Set the long-term memory timestamp for this session
+          jammingIncidentCount++;
+          preferences.putUInt("jamCount", jammingIncidentCount); // Persist the new count
+          Serial.printf("New jamming incident logged. Total incidents: %u\n", jammingIncidentCount);
+          addDisplayLog("Jamming event detected!");
+      }
+
+      // Check if we should send an alert (respect cooldown)
+      if (millis() - lastJammingAlertSent > JAMMING_ALERT_COOLDOWN_MS) {
+          Serial.println("Sending jamming alert to the mesh.");
+          char alertContent[32];
+          snprintf(alertContent, sizeof(alertContent), "Jamming Alert from %s", MAC_suffix_str.c_str());
+          createAndSendMessage(alertContent, strlen(alertContent), MSG_TYPE_JAMMING_ALERT);
+          lastJammingAlertSent = millis();
+      }
+  }
+
+  // --- Jamming Long-Term Memory Reset Logic ---
+  // If a jamming event was recorded, but communication has been restored for a while, clear the alert.
+  if (lastJammingEventTimestamp > 0 && !isCurrentlyJammed && communicationRestoredTimestamp > 0 &&
+      (millis() - communicationRestoredTimestamp > JAMMING_MEMORY_RESET_MS)) {
+      Serial.println("Sustained communication detected. Resetting long-term jamming memory.");
+      lastJammingEventTimestamp = 0; // Reset the long-term memory
+      communicationRestoredTimestamp = 0; // Reset the timer to prevent re-triggering
+      addDisplayLog("Jamming alert cleared.");
+  }
+
 
   if (millis() - lastRebroadcast >= AUTO_REBROADCAST_INTERVAL_MS) {
     lastRebroadcast = millis();
@@ -1016,24 +1163,7 @@ void loop() {
             if (isOrganizerSessionActive) { // Refresh session timestamp if session is active
                 sessionTokenTimestamp = millis();
             }
-
-            // Handle /challenge endpoint for key exchange
-            if (requestedPath == "/challenge") {
-                currentChallengeNonce = String(esp_random()); // Generate a random nonce
-                challengeNonceTimestamp = millis();
-                client.println(F("HTTP/1.1 200 OK"));
-                client.println(F("Content-type:text/plain"));
-                client.println(F("Connection: close"));
-                // Added Cache-Control headers for challenge endpoint
-                client.println(F("Cache-Control: no-cache, no-store, must-revalidate"));
-                client.println(F("Pragma: no-cache"));
-                client.println(F("Expires: 0"));
-                client.println();
-                client.print(currentChallengeNonce);
-                client.stop();
-                return;
-            }
-
+            
             // --- CAPTIVE PORTAL REDIRECT PATCH ---
             // --- BEGIN: Connectivity Check Response Patch ---
             if (!isPost) {
@@ -1113,8 +1243,6 @@ void loop() {
 
             if (isPost) {
               String messageParam = "", passwordParam = "", urgentParam = "", actionParam = "", newPasswordParam = "", confirmNewPasswordParam = "";
-              // For challenge-response
-              String challengeNonceReceived = "", passwordResponseHash = "";
 
               int messageStart = postBody.indexOf("message=");
               if (messageStart != -1) {
@@ -1122,7 +1250,7 @@ void loop() {
                 if (messageEnd == -1) messageEnd = postBody.length();
                 messageParam = postBody.substring(messageStart + 8, messageEnd);
               }
-              // This is the plaintext password from the client (will be cleared after hashing)
+              // This is the plaintext password from the client
               int passwordStart = postBody.indexOf("password_plaintext_client=");
               if (passwordStart != -1) {
                 int passwordEnd = postBody.indexOf('&', passwordStart);
@@ -1149,23 +1277,7 @@ void loop() {
                   confirmNewPasswordParam = postBody.substring(confirmNewPasswordStart + 21, confirmNewPasswordEnd);
               }
 
-
-              // Parse challenge-response parameters
-              int nonceStart = postBody.indexOf("challenge_nonce=");
-              if (nonceStart != -1) {
-                  int nonceEnd = postBody.indexOf('&', nonceStart);
-                  if (nonceEnd == -1) nonceEnd = postBody.length();
-                  challengeNonceReceived = postBody.substring(nonceStart + 16, nonceEnd);
-              }
-              // This is the client-side hashed response
-              int responseHashStart = postBody.indexOf("password_response_hash=");
-              if (responseHashStart != -1) {
-                  int responseHashEnd = postBody.indexOf('&', responseHashStart);
-                  if (responseHashEnd == -1) responseHashEnd = postBody.length();
-                  passwordResponseHash = postBody.substring(responseHashStart + 23, responseHashEnd);
-              }
-
-
+              // Decode URL-encoded parameters
               messageParam.replace('+', ' ');
               String decodedMessage = "";
               for (int i = 0; i < messageParam.length(); i++) {
@@ -1175,6 +1287,18 @@ void loop() {
                   i += 2;
                 } else {
                   decodedMessage += messageParam.charAt(i);
+                }
+              }
+
+              passwordParam.replace('+', ' ');
+              String decodedPassword = "";
+              for (int i = 0; i < passwordParam.length(); i++) {
+                if (passwordParam.charAt(i) == '%' && (i + 2) < passwordParam.length()) {
+                  char decodedChar = (char)strtol((passwordParam.substring(i + 1, i + 3)).c_str(), NULL, 16);
+                  decodedPassword += decodedChar;
+                  i += 2;
+                } else {
+                  decodedPassword += passwordParam.charAt(i);
                 }
               }
 
@@ -1212,63 +1336,45 @@ void loop() {
                           loginAttempts = 0;
                       }
 
-                      // Challenge-response verification (client-side hashed response)
-                      // Validate nonce *before* processing the password hash
-                      if (challengeNonceReceived != currentChallengeNonce ||
-                          millis() - challengeNonceTimestamp > CHALLENGE_TIMEOUT_MS ||
-                          currentChallengeNonce.length() == 0) {
-                          webFeedbackMessage = "<p class='feedback' style='color:red;'>Login failed: Invalid or expired challenge.</p>";
-                          // Clear nonce to force a new challenge for the next attempt
-                          currentChallengeNonce = "";
-                          challengeNonceTimestamp = 0;
+                      // Hash the received plaintext password and compare it to the stored hash
+                      String receivedPasswordHash = simpleHash(decodedPassword);
+                      
+                      Serial.print("Current hashedOrganizerPassword (for login): '"); Serial.print(hashedOrganizerPassword); Serial.println("'");
+                      Serial.print("Received Password Hash (after hashing plaintext): '"); Serial.print(receivedPasswordHash); Serial.println("'");
+
+                      if (receivedPasswordHash.equalsIgnoreCase(hashedOrganizerPassword)) {
+                          loginAttempts = 0;
+                          organizerSessionToken = String(esp_random()) + String(esp_random());
+                          sessionTokenTimestamp = millis();
+                          isOrganizerSessionActive = true;
+                          webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer Mode activated.</p>";
+                          if (!passwordChangeLocked) {
+                              webFeedbackMessage += "<p class='feedback' style='color:orange;'>Note: Node's organizer password is still default. Set a new password to enable sending messages.</p>";
+                          }
+                          
+                          // Preserve existing query parameters for redirect
+                          String redirectQuery = currentQueryParams;
+                          if (redirectQuery.length() > 0) redirectQuery += "&";
+                          redirectQuery += "session_token=" + organizerSessionToken;
+
+                          client.println(F("HTTP/1.1 303 See Other"));
+                          client.println("Location: /?" + redirectQuery); // Preserve query params
+                          client.println(F("Connection: close"));
+                          // Added Cache-Control headers for 303 redirect after POST
+                          client.println(F("Cache-Control: no-cache, no-store, must-revalidate"));
+                          client.println(F("Pragma: no-cache"));
+                          client.println(F("Expires: 0"));
+                          client.println();
+                          client.stop();
+                          return;
                       } else {
-                          // Use the simpleHash function with the *current* hashedOrganizerPassword
-                          // The server computes: hash(stored_hashed_password + nonce)
-                          Serial.print("Current hashedOrganizerPassword (for login): '"); Serial.print(hashedOrganizerPassword); Serial.println("'");
-                          String expectedResponse = simpleHash(hashedOrganizerPassword + challengeNonceReceived);
-                          Serial.print("Expected Response Hash: '"); Serial.print(expectedResponse); Serial.println("'");
-                          Serial.print("Received Password Response Hash: '"); Serial.print(passwordResponseHash); Serial.println("'");
-
-                          if (expectedResponse.equalsIgnoreCase(passwordResponseHash)) { // Compare with client-provided hash
+                          loginAttempts++;
+                          if (loginAttempts >= MAX_LOGIN_ATTEMPTS) {
+                              lockoutTime = millis() + LOCKOUT_DURATION_MS;
                               loginAttempts = 0;
-                              organizerSessionToken = String(esp_random()) + String(esp_random());
-                              sessionTokenTimestamp = millis();
-                              isOrganizerSessionActive = true; // User is logged into the web session
-                              webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer Mode activated.</p>";
-                              if (!passwordChangeLocked) {
-                                  webFeedbackMessage += "<p class='feedback' style='color:orange;'>Note: Node's organizer password is still default. Set a new password to enable sending messages.</p>";
-                              }
-                              // Clear nonce on successful login (or successful password check)
-                              currentChallengeNonce = "";
-                              challengeNonceTimestamp = 0;
-                              
-                              // Preserve existing query parameters for redirect
-                              String redirectQuery = currentQueryParams;
-                              if (redirectQuery.length() > 0) redirectQuery += "&";
-                              redirectQuery += "session_token=" + organizerSessionToken;
-
-                              client.println(F("HTTP/1.1 303 See Other"));
-                              client.println("Location: /?" + redirectQuery); // Preserve query params
-                              client.println(F("Connection: close"));
-                              // Added Cache-Control headers for 303 redirect after POST
-                              client.println(F("Cache-Control: no-cache, no-store, must-revalidate"));
-                              client.println(F("Pragma: no-cache"));
-                              client.println(F("Expires: 0"));
-                              client.println();
-                              client.stop();
-                              return;
+                              webFeedbackMessage = "<p class='feedback' style='color:red;'>Login locked for 5 minutes due to too many failures.</p>";
                           } else {
-                              loginAttempts++;
-                              if (loginAttempts >= MAX_LOGIN_ATTEMPTS) {
-                                  lockoutTime = millis() + LOCKOUT_DURATION_MS;
-                                  loginAttempts = 0;
-                                  webFeedbackMessage = "<p class='feedback' style='color:red;'>Login locked for 5 minutes due to too many failures.</p>";
-                              } else {
-                                  webFeedbackMessage = "<p class='feedback' style='color:red;'>Incorrect password. " + String(MAX_LOGIN_ATTEMPTS - loginAttempts) + " attempts remaining.</p>";
-                              }
-                              // Clear nonce on failed login to force a new challenge
-                              currentChallengeNonce = "";
-                              challengeNonceTimestamp = 0;
+                              webFeedbackMessage = "<p class='feedback' style='color:red;'>Incorrect password. " + String(MAX_LOGIN_ATTEMPTS - loginAttempts) + " attempts remaining.</p>";
                           }
                       }
                   }
@@ -1431,7 +1537,7 @@ void loop() {
             std::sort(sortedSeenPeers.begin(), sortedSeenPeers.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
 
             const int MAX_NODES_TO_DISPLAY_WEB = 4; // Max nodes to display on web interface
-            for (const auto& macPair : sortedSeenPeers) { // Corrected typo here
+            for (const auto& macPair : sortedSeenPeers) { 
                 if (count >= MAX_NODES_TO_DISPLAY_WEB) break;
                 uint8_t macBytes[6];
                 unsigned int tempMac[6]; // Temporary array for sscanf
@@ -1478,72 +1584,9 @@ void loop() {
             client.println(F(".detected-nodes-label{font-weight:bold;margin-bottom:5px;color:#003366;}"));
             client.println(F(".detected-nodes-mac-list{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;width:100%;}")); // Added flex-wrap
             client.println(F("</style></head><body><script>"));
-            // Re-added simpleHash function to client-side JS
-            client.println(F("function simpleHash(input) {"));
-            client.println(F("    // Must match the C++ pseudo-salt for consistency"));
-            client.println(F("    const PSEUDO_SALT = 'ProtestNodeSalt123XYZ';"));
-            client.println(F("    const saltedInput = input + PSEUDO_SALT;"));
-            client.println(F("    let hash = 5381;"));
-            client.println(F("    for (let i = 0; i < saltedInput.length; i++) {"));
-            client.println(F("        hash = ((hash << 5) + hash) + saltedInput.charCodeAt(i);"));
-            client.println(F("    }"));
-            client.println(F("    return (hash >>> 0).toString(16); // Ensure positive and convert to hex"));
-            client.println(F("}"));
-            client.println(F("async function fetchChallengeAndSubmit() {"));
-            client.println(F("    const loginForm = document.getElementById('organizerLoginForm');"));
-            client.println(F("    const passwordInput = document.getElementById('pass_input');"));
-            client.println(F("    const challengeNonceInput = document.getElementById('challenge_nonce_input');"));
-            client.println(F("    const passwordResponseHashInput = document.getElementById('password_response_hash_input');"));
-            client.println(F("    if (!loginForm || !passwordInput || !challengeNonceInput || !passwordResponseHashInput) {"));
-            client.println(F("        console.error('Login form elements not found.');"));
-            client.println(F("        const feedbackDiv = document.createElement('p');"));
-            client.println(F("        feedbackDiv.className = 'feedback';"));
-            client.println(F("        feedbackDiv.style.color = 'red';"));
-            client.println(F("        feedbackDiv.textContent = 'Login failed: Missing form elements. Please refresh the page.';"));
-            client.println(F("        loginForm.parentNode.insertBefore(feedbackDiv, loginForm);"));
-            client.println(F("        return;"));
-            client.println(F("    }"));
-            client.println(F("    console.log('Attempting to fetch challenge and submit form...');"));
-            client.println(F("    try {"));
-            client.println(F("        console.log('Fetching challenge nonce from /challenge...');"));
-            client.println(F("        const response = await fetch('/challenge');"));
-            client.println(F("        if (!response.ok) {"));
-            client.println(F("            throw new Error(`HTTP error! status: ${response.status}`);"));
-            client.println(F("        }"));
-            client.println(F("        const nonce = await response.text();"));
-            client.println(F("        challengeNonceInput.value = nonce;"));
-            client.println(F("        console.log('Received nonce:', nonce);"));
-            client.println(F("        const plaintextPassword = passwordInput.value;"));
-            client.println(F("        // Corrected client-side hashing: hash the plaintext password, then hash with nonce"));
-            client.println(F("        const hashedClientPassword = simpleHash(plaintextPassword);"));
-            client.println(F("        const combinedString = hashedClientPassword + nonce;"));
-            client.println(F("        const responseHash = simpleHash(combinedString);"));
-            client.println(F("        passwordResponseHashInput.value = responseHash;"));
-            client.println(F("        console.log('Generated hash:', responseHash);"));
-            client.println(F("        passwordInput.value = ''; // Clear plaintext password from input for security"));
-            client.println(F("        console.log('Submitting form...');"));
-            client.println(F("        loginForm.submit();"));
-            client.println(F("    } catch (error) {"));
-            client.println(F("        console.error('Authentication process failed:', error);"));
-            client.println(F("        const feedbackDiv = document.createElement('p');"));
-            client.println(F("        feedbackDiv.className = 'feedback';"));
-            client.println(F("        feedbackDiv.style.color = 'red';"));
-            client.println(F("        feedbackDiv.textContent = 'Login failed: ' + error.message + '. Please try again.';"));
-            client.println(F("    }"));
-            client.println(F("}"));
             client.println(F("document.addEventListener('DOMContentLoaded', () => {"));
-            client.println(F("    const loginForm = document.getElementById('organizerLoginForm');"));
-            client.println(F("    if (loginForm) {"));
-            client.println(F("        loginForm.addEventListener('submit', (event) => {"));
-            client.println(F("            event.preventDefault(); // Prevent default form submission"));
-            client.println(F("            fetchChallengeAndSubmit(); // Initiate challenge-response and submit"));
-            client.println(F("        });"));
-            client.println(F("    }"));
-            client.println(F("    // Scroll to the top of the pre element on load for newest messages visibility"));
             client.println(F("    const preElement = document.querySelector('pre');"));
-            client.println(F("    if (preElement) {"));
-            client.println(F("        preElement.scrollTop = 0;"));
-            client.println(F("    }"));
+            client.println(F("    if (preElement) { preElement.scrollTop = 0; }"));
             client.println(F("});"));
             client.println(F("</script>"));
             client.println(F("<body><header><h1>Protest Information Node</h1>"));
@@ -1553,6 +1596,12 @@ void loop() {
                 client.println(F("<p class='feedback' style='color:orange;'>Warning: Public messages are unmoderated.</p>"));
             }
             client.println(F("</header>"));
+
+            // --- Jamming Alert Banner ---
+            if (lastJammingEventTimestamp > 0) {
+                client.println(F("<div style='background-color:#ffdddd; border:1px solid #f5c6cb; color:#721c24; padding:10px; text-align:center; font-weight:bold;'>WARNING: JAMMING EVENT DETECTED</div>"));
+            }
+
             client.println(F("<div class='content-wrapper'><div class='chat-main-content'>"));
 
             if (webFeedbackMessage.length() > 0) { client.println(webFeedbackMessage); webFeedbackMessage = ""; }
@@ -1662,6 +1711,25 @@ void loop() {
                     client.println(F("<p class='feedback' style='color:orange;'>You are logged in, but this node is not yet configured to send messages. Please set an organizer password to enable sending messages. Alternatively, if the password has already been set on another node in the mesh, this node will eventually receive it and enable sending.</p>"));
                 }
 
+                // --- NEW: Security Log Section ---
+                client.println(F("<details style='margin-top:10px;'><summary style='font-size:1.1em;font-weight:bold;cursor:pointer;padding:5px 0;text-align:center;'>Security & Network Health</summary><div class='form-container' style='box-shadow:none;border:none;padding-top:5px; text-align: left;'>"));
+                client.printf("<h3 style='text-align:left;'>Jamming Incidents (since first boot): %u</h3>", jammingIncidentCount);
+                client.printf("<h3 style='text-align:left;'>Checksum Failures (since first boot): %u</h3>", hashFailureCount);
+                if (hashFailureCount > 0) {
+                    client.println(F("<h4>Recent Checksum Failure Log:</h4><ul style='font-size:0.8em; padding-left: 20px;'>"));
+                    for (int i = 0; i < MAX_FAIL_LOG_ENTRIES; i++) {
+                        String key = "failMsg" + String(i);
+                        String logEntry = preferences.getString(key.c_str(), "");
+                        if (logEntry.length() > 0) {
+                            client.print(F("<li>"));
+                            client.print(escapeHtml(logEntry));
+                            client.println(F("</li>"));
+                        }
+                    }
+                    client.println(F("</ul>"));
+                }
+                client.println(F("</div></details>"));
+
                 // Always show Exit Organizer Mode button if logged in
                 client.println(F("<form action='/' method='POST' style='margin-top:10px;'><input type='hidden' name='action' value='exitOrganizer'>"));
                 client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
@@ -1709,9 +1777,7 @@ void loop() {
                     client.println(F("</div></details>"));
                 } else { // Password has been set, prompt to log in
                     client.println(F("<details><summary>Enter Organizer Mode</summary><div class='form-container' style='box-shadow:none;border:none;padding-top:5px;'>"));
-                    client.println(F("<form id='organizerLoginForm' action='/' method='POST'><input type='hidden' name='action' value='enterOrganizer'>"));
-                    client.println(F("<input type='hidden' id='challenge_nonce_input' name='challenge_nonce' value=''>"));
-                    client.println(F("<input type='hidden' id='password_response_hash_input' name='password_response_hash' value=''>"));
+                    client.println(F("<form action='/' method='POST'><input type='hidden' name='action' value='enterOrganizer'>"));
                     if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
                     if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
                     client.println(F("<label for='pass_input'>Password:</label><input type='password' id='pass_input' name='password_plaintext_client' required>"));
@@ -1944,7 +2010,6 @@ void displayStatsInfoMode() {
 
   tft.println("Uptime:");
   tft.printf("  Days: %lu, H: %lu, M: %lu, S: %lu\n", days, hours, minutes, seconds);
-  tft.println("");
 
   tft.println("Message Stats:");
   tft.printf("  Total Sent: %lu\n", totalMessagesSent);
@@ -1952,18 +2017,21 @@ void displayStatsInfoMode() {
   tft.printf("  Urgent Messages: %lu\n", totalUrgentMessages);
   tft.printf("  Cache Size: %u/%u\n", seenMessages.size(), MAX_CACHE_SIZE);
 
-  tft.println("");
   tft.println("Mode Status:");
   tft.printf("  Public Msgs: %s\n", publicMessagingEnabled ? "ENABLED" : "DISABLED");
   tft.printf("  Public Lock: %s\n", publicMessagingLocked ? "LOCKED" : "UNLOCKED");
-  tft.printf("  Node Capable (Password Set): %s\n", passwordChangeLocked ? "YES" : "NO");
+  tft.printf("  Node Capable: %s\n", passwordChangeLocked ? "YES" : "NO");
   
   // Display the unique AP client count
   portENTER_CRITICAL(&apClientsMutex);
   int uniqueClients = apConnectedClients.size();
   portEXIT_CRITICAL(&apClientsMutex);
-  tft.println("");
   tft.println("AP Stats:");
   tft.printf("  Unique Clients: %d\n", uniqueClients);
+
+  tft.println("Network Security:");
+  tft.printf("  Jamming Incidents: %u\n", jammingIncidentCount);
+  tft.printf("  Checksum Failures: %u\n", hashFailureCount);
+  tft.printf("  Current Jamming: %s\n", (lastJammingEventTimestamp > 0) ? "YES" : "NO");
 }
 #endif
