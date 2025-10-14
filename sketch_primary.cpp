@@ -110,8 +110,13 @@ unsigned long lastJammingEventTimestamp = 0;
 unsigned long lastJammingAlertSent = 0;
 unsigned long communicationRestoredTimestamp = 0;
 uint32_t jammingIncidentCount = 0; // Persisted in NVS
+unsigned long lastJammingTimestampPersisted = 0; // Persisted timestamp of last jamming start
+unsigned long lastJammingDurationPersisted = 0;  // Persisted duration of last jamming event
 uint32_t hashFailureCount = 0;     // Persisted in NVS
-const int MAX_FAIL_LOG_ENTRIES = 3;
+const int MAX_FAIL_LOG_ENTRIES = 5;
+bool securityCountersDirty = false; // Flag to trigger batched NVS write
+const unsigned long NVS_WRITE_INTERVAL_MS = 60000; // 1 minute
+unsigned long lastNvsWrite = 0;
 
 // --- Infiltration Detection & Security Logging Variables ---
 const unsigned long INFILTRATION_WINDOW_MS = 300000; // 5 minutes
@@ -119,7 +124,8 @@ const int INFILTRATION_THRESHOLD = 2; // More than 2 unique passwords (i.e., 3+)
 bool isInfiltrationAlert = false; // Volatile
 unsigned long lastInfiltrationEventTimestamp = 0;
 uint32_t infiltrationIncidentCount = 0; // Persisted in NVS
-const int MAX_INFIL_LOG_ENTRIES = 3;
+unsigned long lastInfiltrationTimestampPersisted = 0; // Persisted timestamp of last infiltration alert
+const int MAX_INFIL_LOG_ENTRIES = 5;
 
 struct PasswordUpdateEvent {
     unsigned long timestamp;
@@ -627,8 +633,11 @@ void setup() {
 
   preferences.begin("protest-node", false); // false = read/write mode for security logs
   jammingIncidentCount = preferences.getUInt("jamCount", 0);
+  lastJammingTimestampPersisted = preferences.getULong("jamLastTs", 0);
+  lastJammingDurationPersisted = preferences.getULong("jamLastDur", 0);
   hashFailureCount = preferences.getUInt("hashFailCount", 0);
   infiltrationIncidentCount = preferences.getUInt("infilCount", 0);
+  lastInfiltrationTimestampPersisted = preferences.getULong("infilLastTs", 0);
   if (VERBOSE_MODE) Serial.printf("Loaded from NVS -> Jamming: %u, Hash Failures: %u, Infiltration Attempts: %u\n", jammingIncidentCount, hashFailureCount, infiltrationIncidentCount);
 
   // The node will always start without a session key.
@@ -704,6 +713,7 @@ void setup() {
   lastRebroadcast = millis();
   lastLocalDisplayLogManage = millis();
   lastSeenPeersManage = millis();
+  lastNvsWrite = millis();
 }
 
 String buildQueryString(const String& sessionToken, bool showPublic, bool showUrgent, bool hideSystem) {
@@ -734,7 +744,7 @@ void loop() {
   while (xQueueReceive(nvsQueue, &nvsItem, 0) == pdPASS) {
       if (nvsItem.type == 0) { // Hash failure
           hashFailureCount++;
-          preferences.putUInt("hashFailCount", hashFailureCount);
+          securityCountersDirty = true;
           uint8_t failLogIndex = preferences.getUChar("failLogIdx", 0);
           String logData = formatMac(nvsItem.senderMac) + " | ID: " + String(nvsItem.messageID);
           String key = "failMsg" + String(failLogIndex);
@@ -752,6 +762,10 @@ void loop() {
         isCurrentlyJammed = false;
         communicationRestoredTimestamp = millis();
         if(VERBOSE_MODE) Serial.println("Communication restored. Jamming appears to have stopped.");
+        if (lastJammingEventTimestamp > 0) {
+            lastJammingDurationPersisted = millis() - lastJammingEventTimestamp;
+            securityCountersDirty = true;
+        }
         addDisplayLog("Communication restored.");
     }
 
@@ -789,7 +803,8 @@ void loop() {
             if(VERBOSE_MODE) Serial.println("Received JAMMING_ALERT from a peer. Updating local status.");
             lastJammingEventTimestamp = millis();
             jammingIncidentCount++;
-            preferences.putUInt("jamCount", jammingIncidentCount);
+            lastJammingTimestampPersisted = millis();
+            securityCountersDirty = true;
         }
         esp_now_message_t encryptedForCache = incomingMessage;
         const uint8_t* keyToUse = useSessionKey ? sessionKey : PRE_SHARED_KEY;
@@ -863,7 +878,8 @@ void loop() {
                 isInfiltrationAlert = true;
                 lastInfiltrationEventTimestamp = millis();
                 infiltrationIncidentCount++;
-                preferences.putUInt("infilCount", infiltrationIncidentCount);
+                lastInfiltrationTimestampPersisted = millis();
+                securityCountersDirty = true;
 
                 // Log the MAC of the sender that triggered the alert
                 uint8_t infilLogIndex = preferences.getUChar("infilLogIdx", 0);
@@ -967,7 +983,8 @@ void loop() {
       if (lastJammingEventTimestamp == 0) {
           lastJammingEventTimestamp = millis();
           jammingIncidentCount++;
-          preferences.putUInt("jamCount", jammingIncidentCount);
+          lastJammingTimestampPersisted = millis();
+          securityCountersDirty = true;
           if(VERBOSE_MODE) Serial.printf("New jamming incident logged. Total incidents: %u\n", jammingIncidentCount);
           addDisplayLog("Jamming event detected!");
       }
@@ -998,6 +1015,19 @@ void loop() {
       passwordUpdateHistory.clear();
       portEXIT_CRITICAL(&passwordUpdateHistoryMutex);
       addDisplayLog("Infiltration alert cleared.");
+  }
+
+  // --- Batched NVS Write for Security Counters ---
+  if (securityCountersDirty && (millis() - lastNvsWrite > NVS_WRITE_INTERVAL_MS)) {
+      preferences.putUInt("jamCount", jammingIncidentCount);
+      preferences.putULong("jamLastTs", lastJammingTimestampPersisted);
+      preferences.putULong("jamLastDur", lastJammingDurationPersisted);
+      preferences.putUInt("hashFailCount", hashFailureCount);
+      preferences.putUInt("infilCount", infiltrationIncidentCount);
+      preferences.putULong("infilLastTs", lastInfiltrationTimestampPersisted);
+      securityCountersDirty = false;
+      lastNvsWrite = millis();
+      if(VERBOSE_MODE) Serial.println("Security counters written to NVS.");
   }
 
   if (millis() - lastRebroadcast >= AUTO_REBROADCAST_INTERVAL_MS) {
@@ -1437,9 +1467,20 @@ void loop() {
                 } else { client.println(F("<p class='feedback' style='color:orange;'>You are logged in, but this node is not yet configured to send messages. Please set an organizer password to enable sending messages. Alternatively, if the password has already been set on another node in the mesh, this node will eventually receive it and enable sending.</p>")); }
                 
                 client.println(F("<details style='margin-top:10px;'><summary style='font-size:1.1em;font-weight:bold;cursor:pointer;padding:5px 0;text-align:center;'>Security & Password</summary><div class='form-container' style='box-shadow:none;border:none;padding-top:5px; text-align: left;'>"));
+                
+                // --- ADDED FORENSIC DATA DISPLAY ---
                 client.printf("<h3 style='text-align:left;'>Jamming Incidents (since first boot): %u</h3>", jammingIncidentCount);
+                if (jammingIncidentCount > 0) {
+                    char timeAgo[20];
+                    unsigned long secondsAgo = (millis() - lastJammingTimestampPersisted) / 1000;
+                    if (secondsAgo < 60) snprintf(timeAgo, sizeof(timeAgo), "%lus ago", secondsAgo);
+                    else if (secondsAgo < 3600) snprintf(timeAgo, sizeof(timeAgo), "%lum ago", secondsAgo / 60);
+                    else snprintf(timeAgo, sizeof(timeAgo), "%luh ago", secondsAgo / 3600);
+                    client.printf("<p style='font-size:0.8em; margin-left: 15px;'>Last Event: %s (%lu ms duration)</p>", 
+                                  lastJammingTimestampPersisted == 0 ? "N/A" : timeAgo, lastJammingDurationPersisted);
+                }
+
                 client.printf("<h3 style='text-align:left;'>Checksum Failures (since first boot): %u</h3>", hashFailureCount);
-                client.printf("<h3 style='text-align:left;'>Infiltration Attempts (since first boot): %u</h3>", infiltrationIncidentCount);
                 if (hashFailureCount > 0) {
                     client.println(F("<h4>Recent Checksum Failure Log:</h4><ul style='font-size:0.8em; padding-left: 20px;'>"));
                     for (int i = 0; i < MAX_FAIL_LOG_ENTRIES; i++) {
@@ -1447,6 +1488,17 @@ void loop() {
                         if (logEntry.length() > 0) { client.print(F("<li>")); client.print(escapeHtml(logEntry)); client.println(F("</li>")); }
                     }
                     client.println(F("</ul>"));
+                }
+
+                client.printf("<h3 style='text-align:left;'>Infiltration Attempts (since first boot): %u</h3>", infiltrationIncidentCount);
+                if (infiltrationIncidentCount > 0) {
+                    char timeAgo[20];
+                    unsigned long secondsAgo = (millis() - lastInfiltrationTimestampPersisted) / 1000;
+                    if (secondsAgo < 60) snprintf(timeAgo, sizeof(timeAgo), "%lus ago", secondsAgo);
+                    else if (secondsAgo < 3600) snprintf(timeAgo, sizeof(timeAgo), "%lum ago", secondsAgo / 60);
+                    else snprintf(timeAgo, sizeof(timeAgo), "%luh ago", secondsAgo / 3600);
+                     client.printf("<p style='font-size:0.8em; margin-left: 15px;'>Last Event: %s</p>", 
+                                  lastInfiltrationTimestampPersisted == 0 ? "N/A" : timeAgo);
                 }
                 if (infiltrationIncidentCount > 0) {
                     client.println(F("<h4>Recent Infiltration Attempt Log (Sender MACs):</h4><ul style='font-size:0.8em; padding-left: 20px;'>"));
@@ -1456,6 +1508,7 @@ void loop() {
                     }
                     client.println(F("</ul>"));
                 }
+                // --- END FORENSIC DATA DISPLAY ---
 
                 client.println(F("<hr style='margin: 15px 0;'><h3>Set/Reset Organizer Password:</h3>"));
                 if (passwordChangeLocked) {
@@ -1646,8 +1699,15 @@ void displayStatsInfoMode() {
   tft.printf("  Unique Clients: %d\n", uniqueClients);
   tft.println("Network Security:");
   tft.printf("  Jamming Incidents: %u\n", jammingIncidentCount);
+  if(jammingIncidentCount > 0 && lastJammingTimestampPersisted > 0) {
+      tft.printf("    Last: %lu s ago\n", (millis() - lastJammingTimestampPersisted) / 1000);
+      tft.printf("    Dur: %lu ms\n", lastJammingDurationPersisted);
+  }
   tft.printf("  Checksum Failures: %u\n", hashFailureCount);
   tft.printf("  Infiltration Attempts: %u\n", infiltrationIncidentCount);
+  if(infiltrationIncidentCount > 0 && lastInfiltrationTimestampPersisted > 0) {
+      tft.printf("    Last: %lu s ago\n", (millis() - lastInfiltrationTimestampPersisted) / 1000);
+  }
   tft.printf("  Current Jamming: %s\n", (lastJammingEventTimestamp > 0) ? "YES" : "NO");
   tft.printf("  Infiltration Alert: %s\n", isInfiltrationAlert ? "YES" : "NO");
 }
