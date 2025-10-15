@@ -1,149 +1,105 @@
-Protest Information Node
-This project implements a decentralized, local communication network designed for sharing information in environments where traditional internet or cellular services might be unavailable or unreliable. Each device acts as a node in a self-organizing mesh, enabling communication without a central server.
+Protest Information Node — User Guide
+Overview
+The Protest Information Node is a self-contained mesh device that lets participants share and view text messages, monitor network health, and detect jamming or infiltration attempts—all via a simple captive-portal web interface and onboard TFT display.
 
-Features
-The Protest Information Node provides a robust way for people to share messages locally:
+Getting Started
+Power the node (5 V via USB or VIN).
 
-Offline Communication: Operates entirely without internet access, creating its own local Wi-Fi network.
+The node boots into a Wi-Fi SoftAP named ProtestInfo_<XXYY> (last two bytes of its MAC).
 
-Public Message Viewing: Anyone connected to a node's Wi-Fi can view received messages.
+Connect your phone or laptop to that SSID—no password required.
 
-Organizer Messaging: Authorized organizers can send important, prioritized messages, including "Urgent" alerts.
+Open any web browser; you’ll be redirected to the node’s web UI (http://192.168.4.1).
 
-Public Message Sending: Users can send public messages, but this feature is off by default and must be enabled by an organizer.
+Web Interface
+Header & Status
+IP & MAC: Shown at the top.
 
-Message Mesh Propagation: Messages automatically spread from node to node, extending communication reach across the local area.
+Non-Violence Reminder: Always displayed.
 
-Local Display: If a TFT screen is attached, it can directly show messages (all or urgent only), device information, and network statistics.
+Public Warning: If public messaging is enabled, a “Public messages are unmoderated” alert appears.
 
-Web Interface (SoftAP): Each node hosts a local web interface accessible via its Wi-Fi network, providing message logs and control options.
+Jamming/Infiltration Alerts: Red or amber banners show when the mesh detects interference or conflicting password updates.
 
-Organizer Mode Controls: Authenticated organizers can manage network settings, including toggling public messaging, re-broadcasting message caches, and setting the initial organizer password.
+Message Log & Filters
+Serial Data Log: Scrollable area showing the most recent messages (newest at the top).
 
-Getting Started (Flashing Firmware)
-To upload the code to your ESP32 board using the Arduino IDE:
+Show/Hide Public: Toggle display of Public: messages.
 
-Install Arduino IDE: Download and install the Arduino IDE from the official website.
+Only Urgent/Show All: Filter for messages prefixed with Urgent:.
 
-Add ESP32 Board Support:
+Hide/Show System: Organizer-only control to hide system-generated entries.
 
-Go to File > Preferences.
+Organizer Mode
+Initial Setup
+On first boot the organizer password is set to the default "password".
 
-In "Additional Boards Manager URLs," add: https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+You may immediately enter Organizer Mode and choose a new mesh-wide password.
 
-Go to Tools > Board > Boards Manager...
+Entering Organizer Mode
+Expand Enter Organizer Mode.
 
-Search for "esp32" and install the "esp32 by Espressif Systems" package.
+Submit the current organizer password.
 
-Install Libraries:
+Once authenticated, you’ll see Organizer Controls.
 
-Go to Sketch > Include Library > Manage Libraries...
+Organizer Controls
+Send Organizer Message
 
-Search for and install TFT_eSPI (only required if USE_DISPLAY is set to true in the code).
+Enter text (max 214 chars).
 
-Open Project: Open the .ino file (this code) in Arduino IDE.
+Check Urgent to prefix with Urgent:.
 
-Select Board: Go to Tools > Board > ESP32 Arduino and select your specific ESP32 board (e.g., "ESP32 Dev Module").
+Click Send Message to broadcast.
 
-Select Port: Go to Tools > Port and select the serial port connected to your ESP32.
+Admin Actions
 
-Upload: Click the "Upload" button (right arrow icon) to compile and flash the code to your ESP32.
+Re-broadcast Cache: Flood the mesh with recent messages still under TTL.
 
-Once flashed, the ESP32 will reboot and automatically start its local Wi-Fi network and communication services.
+Enable/Disable Public Msgs: Toggle and lock public messaging across the mesh.
 
-How to Use (Quick Start Guide)
-After flashing and powering on a node, follow these steps to interact with its web interface:
+Security & Password
 
-Connect to Wi-Fi: On your phone or computer, search for Wi-Fi networks. Connect to the network named ProtestInfo_XXXX (where XXXX are the last four characters of the node's unique hardware address). No password is required for the Wi-Fi connection itself.
+View total jamming incidents, checksum failures, and infiltration attempts since boot.
 
-Access the Web Interface: Your device should automatically open a "captive portal" page. If not, open a web browser and try to navigate to any website (e.g., http://example.com). You will be redirected to the node's local web interface.
+Expand logs for recent failure IDs and MACs of suspicious password updates.
 
-View Messages: The main page displays a log of all messages received by this node. Use the filter buttons ("Show Public Messages" / "Hide Public Messages" and "Show Urgent Only" / "Show All Messages") to customize your view.
+Set/Reset Organizer Password (once only per boot): Choose and confirm a new password. After setting, the default is permanently locked until reboot, and the new password propagates mesh-wide.
 
-Access Organizer Mode: To unlock advanced features, find the "Enter Organizer Mode" section.
+Exit Organizer Mode: Log out to return to the public view.
 
-Initial Setup: If this is a new node, you'll first be prompted to "Set Initial Organizer Password." Choose a strong password and confirm it. This password will then spread to all other connected nodes in the mesh. You only need to set the organizer password once across your network.
+Public Messaging
+If organizers have enabled public messaging, anyone can send public messages without logging in:
 
-Logging In: After the password is set, use this section to log in as an organizer with your chosen password.
+Expand Send a Public Message.
 
-Send Public Messages: Locate the "Send a Public Message" section. This feature is off by default. An organizer must enable it through "Organizer Mode." Once enabled, you can type and send messages that will be shared across all connected nodes.
+Enter text (max 214 chars).
 
-Understanding the Locking Mechanisms
-The system incorporates two important locking mechanisms for security and control:
+Click Send Public Message.
 
-Organizer Password Lock: The organizer password for a node is set at runtime. Once a non-default password is set (either locally or received from another node), it becomes permanently locked for that session. This means the password cannot be changed through the web interface without physically rebooting the ESP32 board. Upon reboot, the organizer password for that specific board will reset to its default value ('password'). To truly reset the organizer password across an entire mesh (i.e., change it from a previously set non-default value to a new non-default value), all boards in the mesh must be powered off before setting the new password on a single board and then powering others back on. This ensures that the new password propagates without interference from other nodes still holding the old password. This mechanism ensures that once a node is deployed with a specific organizer password, it maintains that security setting, preventing unauthorized password changes over the air.
+Detected Nodes
+At the bottom of the main page you’ll see up to four of the most recently seen peers, masked as xxxx.xxxx.xxxx.<suffix>. This updates in real time as mesh devices discover one another.
 
-Public Messaging Lock: An organizer has the ability to "Disable Public Msgs," which also "locks" public messaging off. This means that once public messaging is locked off by an organizer, it cannot be re-enabled through the web interface until the board is rebooted. This provides a critical control mechanism for organizers to shut down public communication if necessary, preventing its re-activation without physical intervention.
+TFT Display (Touch-Enabled--optional, non-screen devices work fine)
+Touch the screen to cycle through four modes:
 
-Technical Details (For Developers)
-This section provides a deeper dive into the technical implementation for developers and those interested in the underlying mechanisms.
+All Messages: Scrolls the full chat log.
 
-ESP-NOW Mesh Network:
+Urgent Only: Displays only messages beginning with Urgent:.
 
-Each node establishes a peer-to-peer connection with other nearby nodes using ESP-NOW, a connectionless communication protocol.
+Device Info: Lists nearby nodes and seconds since last seen.
 
-There is no central server; messages are relayed between nodes in a mesh-like fashion.
+Stats Info: Shows uptime, total sent/received, urgent count, cache size, AP clients, public-messaging status, and security counters.
 
-Nodes dynamically discover each other and add new peers to their network.
+The display refreshes every 10 seconds; touch events are debounced at 500 ms.
 
-Message Types & Prioritization:
+Mesh Behavior & Diagnostics
+Automatic Discovery: Every 15 s a discovery broadcast resets the peer list.
 
-Organizer Messages (MSG_TYPE_ORGANIZER): Sent by authenticated organizers, can be marked as "Urgent."
+Auto-Rebroadcast: Every 30 s, messages still under TTL are re-flooded.
 
-Public Messages (MSG_TYPE_PUBLIC): Sent by any connected user when public messaging is enabled.
+Jamming Detection: If no messages arrive from any peer for 60 s, a jamming alert logs locally and broadcasts a JAMMING_ALERT.
 
-Auto-Init Messages (MSG_TYPE_AUTO_INIT): Sent by a node upon startup.
+Infiltration Detection: Conflicting password updates within 5 minutes trigger an infiltration alert and log the offending MAC.
 
-Command Messages (MSG_TYPE_COMMAND): Used by organizers to control network-wide settings (e.g., enabling/disabling public messaging).
-
-Discovery Messages (MSG_TYPE_DISCOVERY): Used for peer discovery and network topology maintenance.
-
-Password Update Messages (MSG_TYPE_PASSWORD_UPDATE): Broadcast to update organizer passwords across the mesh.
-
-Status Request/Response Messages (MSG_TYPE_STATUS_REQUEST, MSG_TYPE_STATUS_RESPONSE): Used for nodes to query and share their public messaging status.
-
-Encryption:
-
-All message content is encrypted using a simple XOR stream cipher with a pre-shared key (PSK) known to all nodes. This provides a basic layer of confidentiality.
-
-Message Deduplication and Re-broadcasting:
-
-Each message is assigned a unique ID and original sender MAC.
-
-Nodes maintain a cache of recently seen messages to prevent redundant processing and re-broadcasting.
-
-Messages have a Time-To-Live (TTL) counter, which decrements with each hop. Messages are re-broadcast until their TTL reaches zero, ensuring propagation across the mesh.
-
-Web Interface (SoftAP):
-
-Each node creates its own Wi-Fi Access Point (SoftAP) with a unique SSID (e.g., "ProtestInfo_EEFF").
-
-Users connect to this Wi-Fi network. A captive portal redirects all web requests to the node's local web interface.
-
-Public Page: Displays the message log. Public message sending is available if enabled by an organizer.
-
-Organizer Page: Accessible via password-based challenge-response authentication. Organizers can:
-
-Send organizer messages (including "Urgent" messages).
-
-Toggle public messaging on/off.
-
-Set an initial organizer password for the node. Once set, the password cannot be changed without rebooting the board.
-
-Re-broadcast the message cache.
-
-Public Messaging Lock: An organizer can permanently disable public messaging (until the board is rebooted) via a command.
-
-Local Display (TFT):
-
-If a TFT display is connected, the node can cycle through different display modes:
-
-All messages (chat log).
-
-Urgent messages only.
-
-Device information (MAC, IP, nearby nodes).
-
-Network statistics (messages sent/received, cache size, uptime).
-
-Display modes can be changed via touch input (if supported by the TFT).
+Checksum Logging: Failed decrypt/checksum events increment a counter and store details in NVS for forensic review.
