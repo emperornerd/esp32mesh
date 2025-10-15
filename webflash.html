@@ -2,135 +2,532 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>ESP32 Web Flasher (Local Bundle + Verbose)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Protest Node Flash Tool</title>
   <style>
+    :root {
+      --primary-color: #0066cc;
+      --primary-hover: #0052a3;
+      --secondary-color: #c60;
+      --secondary-hover: #a50;
+      --dark-bg: #222;
+      --medium-bg: #333;
+      --light-text: #eee;
+      --medium-text: #aaa;
+      --dark-text: #111;
+      --border-color: #444;
+      --success-color: #0f0;
+      --error-color: #f55;
+    }
+    * { box-sizing: border-box; }
     body {
+      background: var(--dark-bg);
+      color: var(--light-text);
       font-family: Arial, sans-serif;
-      background: #222;
-      color: #eee;
-      padding: 30px;
+      margin: 0;
+      padding: 0;
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+    }
+    .main-content {
+      flex: 1;
+      padding: 20px;
+      overflow-y: scroll;
+      height: 100vh;
+      transition: margin-left 0.3s ease;
+    }
+    .main-content.console-open {
+      margin-left: 450px;
+    }
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      padding-bottom: 40px;
+    }
+    h1 {
+      text-align: center;
+      margin: 20px 0 30px 0;
+      font-size: 32px;
+    }
+    .info-box {
+      background: var(--medium-bg);
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 20px;
+      border: 1px solid var(--border-color);
+    }
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      margin: 8px 0;
+      font-size: 14px;
+    }
+    .info-label { color: var(--medium-text); }
+    .info-value { font-weight: bold; }
+    .status-good { color: var(--success-color); }
+    .status-bad { color: var(--error-color); }
+    
+    .button-container {
+      text-align: center;
+      margin: 30px 0;
+    }
+    
+    .flash-mode-section {
+      background: var(--medium-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 20px;
+      margin: 20px 0;
       text-align: center;
     }
-    button {
-      font-size: 16px;
-      margin: 10px;
-      padding: 10px 20px;
+    .flash-mode-section label {
+      margin: 0 15px;
+      font-size: 14px;
       cursor: pointer;
     }
-    #log {
-      background: #000;
-      color: #0f0;
-      font-family: monospace;
-      text-align: left;
-      white-space: pre-wrap;
-      border-radius: 5px;
-      border: 1px solid #444;
-      padding: 10px;
-      width: 90%;
-      height: 300px;
-      margin: 20px auto;
-      overflow-y: scroll;
+    .flash-mode-section input {
+      margin-right: 8px;
+      vertical-align: middle;
+    }
+
+    /* Base styles for all primary action buttons */
+    .btn {
+      color: #fff;
+      border: none;
+      padding: 15px 40px;
+      font-size: 18px;
+      font-weight: bold;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background-color 0.2s, transform 0.1s;
+    }
+    .btn:hover {
+      transform: translateY(-2px);
+    }
+    .btn:active {
+      transform: translateY(0px);
+    }
+    .btn:disabled {
+      background-color: #555 !important;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    /* Flasher Button */
+    #flashBtn {
+      background: var(--primary-color);
+    }
+    #flashBtn:hover:not(:disabled) {
+      background: var(--primary-hover);
+    }
+    
+    /* Secondary buttons, e.g., download */
+    .btn-secondary {
+      background: var(--secondary-color);
+      padding: 12px 24px;
+      font-size: 16px;
+    }
+    .btn-secondary:hover:not(:disabled) {
+      background: var(--secondary-hover);
+    }
+    
+    .warning {
+      background: #553300;
+      color: #ff9;
+      border-left: 4px solid #fb923c;
+      padding: 15px 20px;
+      border-radius: 6px;
+      margin: 20px 0;
+      font-size: 14px;
+    }
+    
+    .boot-prompt {
+      background: #004488;
+      color: #fff;
+      border-left: 4px solid #0088ff;
+      padding: 15px 20px;
+      border-radius: 6px;
+      margin: 20px 0;
+      font-size: 14px;
+      display: none;
+    }
+    .boot-prompt.show { display: block; }
+    
+    .instructions {
+      background: var(--medium-bg);
+      border-radius: 8px;
+      padding: 20px;
+      margin-top: 30px;
+      font-size: 14px;
+      line-height: 1.6;
+      border: 1px solid var(--border-color);
+    }
+    
+    /* Console Panel - Left Side */
+    .log-container {
+      position: fixed; top: 0; left: 0; bottom: 0;
+      width: 450px;
+      background: #1a1a1a;
+      border-right: 2px solid var(--border-color);
+      display: flex; flex-direction: column;
+      transition: transform 0.3s ease;
+      z-index: 1000;
+    }
+    .log-container.minimized {
+      transform: translateX(calc(-100% + 50px));
+    }
+    .log-container.minimized .resize-handle { display: none; }
+    .log-container.minimized .log-header {
+      position: absolute;
+      right: 0;
+      top: 0;
+      cursor: pointer;
+      writing-mode: vertical-rl;
+      text-orientation: mixed;
+      width: 50px;
+      padding: 15px 10px;
+      border-bottom: none;
+    }
+    .log-container.minimized .log-header:hover { background: var(--primary-color); }
+    .log-container.minimized .log-header h3 { transform: rotate(180deg); }
+    .log-container.minimized .log-content { display: none; }
+    
+    .resize-handle {
+      position: absolute; right: 0; top: 0; bottom: 0;
+      width: 6px; cursor: ew-resize; z-index: 10;
+    }
+    
+    .log-header {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 15px 20px; background: #2a2a2a;
+      user-select: none; flex-shrink: 0;
+      border-bottom: 1px solid var(--border-color); cursor: pointer;
+    }
+    .log-header h3 { margin: 0; font-size: 16px; }
+    .log-content { flex: 1; padding: 15px; overflow-y: auto; overflow-x: hidden; }
+    pre {
+      background: #000; color: var(--success-color);
+      font-family: 'Consolas', 'Monaco', monospace; white-space: pre-wrap;
+      word-wrap: break-word; border: 1px solid var(--border-color);
+      border-radius: 6px; padding: 12px; margin: 0;
+      font-size: 12px; line-height: 1.5;
+    }
+    
+    @media (max-width: 1024px) {
+      body { flex-direction: column; }
+      .main-content { height: auto; min-height: calc(100vh - 300px); margin-left: 0 !important; }
+      .main-content.console-open { margin-bottom: 300px; }
+      .log-container {
+        position: fixed; top: auto; right: 0; bottom: 0; left: 0;
+        width: auto !important; height: 300px;
+        border-right: none; border-top: 2px solid var(--border-color);
+      }
+      .log-container.minimized { transform: translateY(calc(100% - 50px)); }
+      .log-container.minimized .log-header {
+          position: static; /* Revert for bottom bar layout */
+          writing-mode: horizontal-tb;
+          width: auto;
+          padding: 12px 20px;
+      }
+      .log-container.minimized .log-header h3 { transform: none; }
+      .resize-handle {
+        left: 0; right: 0; top: 0; bottom: auto;
+        width: auto; height: 6px; cursor: ns-resize;
+      }
     }
   </style>
+  
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
 </head>
 <body>
-  <h1>ESP32 Web Flasher (Local Bundle + Verbose)</h1>
-  <p><strong>Firmware:</strong> <code>firmware.bin</code></p>
-  <button id="connectBtn">🔌 Connect</button>
-  <button id="flashBtn" disabled>⚡ Flash</button>
-  <div id="log">Console output...</div>
+  <div class="main-content" id="mainContent">
+    <div class="container">
+      <h1>Protest Node Flash Tool</h1>
+      
+      <div class="info-box">
+        <div class="info-row"><span class="info-label">User Agent:</span><span class="info-value" id="browser"></span></div>
+        <div class="info-row"><span class="info-label">Platform:</span><span class="info-value" id="platform"></span></div>
+        <div class="info-row"><span class="info-label">Secure Context:</span><span class="info-value" id="secure"></span></div>
+        <div class="info-row"><span class="info-label">Web Serial API:</span><span class="info-value" id="serial"></span></div>
+      </div>
 
-  <!-- Load your local bundle.js here -->
-  <script src="bundle.js"></script>
+      <div class="warning">
+        <strong>⚠️ Before flashing:</strong>
+        <ul>
+          <li>Close any serial monitor programs (Arduino IDE, PuTTY, etc.)</li>
+          <li>Close any other browser tabs using the ESP32</li>
+          <li>Unplug and replug your ESP32 if needed</li>
+        </ul>
+      </div>
+
+      <div class="boot-prompt" id="bootPrompt">
+        <strong>🔄 Press BOOT button on your ESP32</strong>
+        <p>If flashing fails or times out, you may need to manually enter boot mode.</p>
+      </div>
+
+      <div class="flash-mode-section">
+        <label><input type="radio" name="flashMode" value="compatibility" checked> Compatibility Mode</label>
+        <label><input type="radio" name="flashMode" value="secure"> Secure Mode</label>
+      </div>
+      
+      <div id="compatibility-mode-controls" style="text-align: center; margin: 20px 0;">
+         <a href="./sketch_jun11a.ino.merged.bin" download="unmodified_firmware.bin" style="text-decoration: none;">
+            <button class="btn btn-secondary">Download Unmodified Firmware</button>
+         </a>
+         <p style="font-size: 12px; color: var(--error-color); margin-top: 10px; max-width: 450px; margin-left: auto; margin-right: auto;">
+            <strong>Warning:</strong> This firmware is unmodified and uses a default, insecure key. It should only be used for testing purposes.
+         </p>
+      </div>
+
+      <div id="secure-mode-controls" style="display: none; text-align: center; margin: 20px 0;">
+        <div id="sessionPskDisplay" style="font-family: 'Consolas', monospace; font-size: 14px; background: var(--dark-text); padding: 10px; border-radius: 4px; border: 1px solid var(--border-color); color: var(--medium-text);">
+          Session PSK will be generated automatically...
+        </div>
+        <button id="downloadSecureBtn" class="btn btn-secondary" style="margin-top: 15px;" disabled>
+          Download Patched Secure Firmware
+        </button>
+      </div>
+
+      <div class="button-container">
+        <esp-web-install-button manifest="./manifest.json" id="installButton" hide-logs>
+          <button slot="activate" id="flashBtn" class="btn">
+            ⚡ Flash Firmware
+          </button>
+        </esp-web-install-button>
+      </div>
+
+      <div class="instructions">
+        <h3>📋 Instructions</h3>
+        <ol>
+          <li>Connect your ESP32 to your computer via USB.</li>
+          <li>Select your flashing mode. For Secure Mode, a key is generated for your session automatically.</li>
+          <li>Click "Flash Firmware" and select the ESP32 port from the popup.</li>
+          <li>Wait for flashing to complete, then press RESET on your ESP32.</li>
+        </ol>
+      </div>
+    </div>
+  </div>
+
+  <div class="log-container" id="logContainer">
+    <div class="resize-handle" id="resizeHandle"></div>
+    <div class="log-header" id="logHeader"><h3>📊 Console Output</h3></div>
+    <div class="log-content"><pre id="log">Ready to flash...</pre></div>
+  </div>
 
   <script>
+    const browserEl = document.getElementById('browser');
+    const platformEl = document.getElementById('platform');
+    const serialEl = document.getElementById('serial');
+    const secureEl = document.getElementById('secure');
     const logEl = document.getElementById('log');
-    const connectBtn = document.getElementById('connectBtn');
+    const bootPrompt = document.getElementById('bootPrompt');
+    const installButton = document.getElementById('installButton');
+    const logContainer = document.getElementById('logContainer');
+    const resizeHandle = document.getElementById('resizeHandle');
+    const logHeader = document.getElementById('logHeader');
+    const mainContent = document.getElementById('mainContent');
+    
+    // UI ELEMENTS
     const flashBtn = document.getElementById('flashBtn');
+    const secureModeControls = document.getElementById('secure-mode-controls');
+    const compatibilityModeControls = document.getElementById('compatibility-mode-controls');
+    const sessionPskDisplay = document.getElementById('sessionPskDisplay');
+    const downloadSecureBtn = document.getElementById('downloadSecureBtn');
 
-    let port = null;
-    let chip = null;
-    let firmware = null;
+    // SESSION VARIABLES for secure flashing
+    let patchedFirmwareUrl = null;
+    let sessionPsk = null;
 
-    function log(msg) {
-      const t = new Date().toLocaleTimeString();
-      logEl.textContent += `\n[${t}] ${msg}`;
+    // Display system info
+    browserEl.textContent = navigator.userAgent;
+    platformEl.textContent = navigator.platform;
+    const hasSerial = 'serial' in navigator;
+    serialEl.textContent = hasSerial ? '✅ Available' : '❌ Not Available';
+    serialEl.className = hasSerial ? 'info-value status-good' : 'info-value status-bad';
+    const isSecure = window.isSecureContext;
+    secureEl.textContent = isSecure ? '✅ Yes' : '❌ No';
+    secureEl.className = isSecure ? 'info-value status-good' : 'info-value status-bad';
+
+    function log(msg, type = 'info') {
+      const time = new Date().toLocaleTimeString();
+      const prefix = type === 'error' ? '❌' : type === 'success' ? '✅' : 'ℹ️';
+      logEl.textContent += `[${time}] ${prefix} ${msg}\n`;
       logEl.scrollTop = logEl.scrollHeight;
-      console.log(msg);
+      console[type === 'error' ? 'error' : 'log'](msg);
     }
 
-    log("📦 Page loaded");
+    logHeader.addEventListener('click', () => {
+        logContainer.classList.toggle('minimized');
+        mainContent.classList.toggle('console-open', !logContainer.classList.contains('minimized'));
+    });
+    mainContent.classList.add('console-open'); // Start with console open
 
-    if (!('serial' in navigator)) {
-      log("❌ Web Serial API not supported.");
-      connectBtn.disabled = true;
-    }
+    // Resizable console logic
+    let isResizing = false;
+    let startX, startY, startWidth, startHeight;
+    resizeHandle.addEventListener('mousedown', (e) => { isResizing = true; startX = e.clientX; startY = e.clientY; startWidth = logContainer.offsetWidth; startHeight = logContainer.offsetHeight; e.preventDefault(); });
+    document.addEventListener('mousemove', (e) => {
+      if (!isResizing) return;
+      if (window.innerWidth > 1024) { const width = startWidth + (e.clientX - startX); if (width >= 300 && width <= window.innerWidth * 0.6) { logContainer.style.width = width + 'px'; mainContent.style.marginLeft = width + 'px'; } }
+      else { const height = startHeight - (e.clientY - startY); if (height >= 150 && height <= window.innerHeight * 0.7) { logContainer.style.height = height + 'px'; } }
+    });
+    document.addEventListener('mouseup', () => { isResizing = false; });
 
-    // Load firmware locally from same folder
-    fetch("firmware.bin")
-      .then(res => {
-        log("📡 Fetching firmware.bin...");
-        if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
-        return res.arrayBuffer();
-      })
-      .then(buf => {
-        firmware = new Uint8Array(buf);
-        log(`✅ firmware.bin loaded (${firmware.length} bytes)`);
-      })
-      .catch(err => log("❌ Firmware load failed: " + err.message));
+    // --- Secure Flashing Logic ---
+    const PSK_LENGTH = 16;
+    const DEFAULT_PSK = new Uint8Array([
+      0x7C, 0xE3, 0x91, 0x2F, 0xA8, 0x5D, 0xB4, 0x69,
+      0x3E, 0xC7, 0x14, 0xF2, 0x86, 0x0B, 0xD9, 0x4A
+    ]);
 
-    connectBtn.addEventListener("click", async () => {
-      try {
-        log("🔍 Requesting serial port...");
-        port = await navigator.serial.requestPort();
-        log("🖧 Port selected.");
-
-        log("🔑 Opening port...");
-        await port.open({ baudRate: 115200 });
-        log("✅ Port opened.");
-
-        if (!window.ESPWebTools || !window.ESPWebTools.ESPLoader) {
-          log("❌ ESPWebTools or ESPLoader not found on window object.");
-          return;
+    function findSubarray(haystack, needle) {
+      for (let i = 0; i <= haystack.length - needle.length; i++) {
+        let found = true;
+        for (let j = 0; j < needle.length; j++) {
+          if (haystack[i + j] !== needle[j]) { found = false; break; }
         }
-
-        log("⚙️ Creating ESPLoader instance...");
-        chip = new window.ESPWebTools.ESPLoader(port, false, log);
-
-        log("🔄 Initializing chip...");
-        await chip.initialize();
-        log("✅ Chip initialized.");
-
-        flashBtn.disabled = false;
-        log("🚀 Ready to flash!");
-      } catch (e) {
-        log("❌ Connect error: " + e.message);
+        if (found) return i;
       }
-    });
+      return -1;
+    }
 
-    flashBtn.addEventListener("click", async () => {
-      if (!firmware) {
-        log("⚠️ Firmware missing");
-        return;
+    function generateHexKey(length) {
+      const bytes = new Uint8Array(length);
+      window.crypto.getRandomValues(bytes);
+      return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+    }
+
+    async function prepareSecureFirmware() {
+      log('Preparing Secure Firmware for this session...');
+      flashBtn.disabled = true;
+      downloadSecureBtn.disabled = true;
+      sessionPskDisplay.textContent = 'Generating key and patching firmware...';
+      sessionPskDisplay.style.color = 'var(--medium-text)';
+
+      if (patchedFirmwareUrl) {
+        URL.revokeObjectURL(patchedFirmwareUrl);
       }
-      if (!chip) {
-        log("⚠️ Chip not connected");
-        return;
-      }
+      
       try {
-        log("⚡ Flashing firmware...");
-        await chip.flashData([{ data: firmware, address: 0x1000 }], true);
-        log("✅ Flash complete.");
+        sessionPsk = generateHexKey(PSK_LENGTH);
+        const obfuscatedPsk = '**************************' + sessionPsk.slice(-6);
+        log('****************************************************************');
+        log(`🔑 New Secure Session PSK: ${obfuscatedPsk}`);
+        log('   This key will be used for all devices flashed in this session.');
+        log('****************************************************************');
+        sessionPskDisplay.textContent = `Session PSK: ${obfuscatedPsk}`;
+        sessionPskDisplay.style.color = 'var(--light-text)';
 
-        log("🔌 Disconnecting...");
-        await chip.transport.disconnect();
-        log("🔌 Port disconnected.");
+        const manifest = await (await fetch('./manifest.json')).json();
+        const firmwarePart = manifest.builds[0].parts.find(part => part.path.includes("sketch_jun11a.ino.merged.bin"));
+        if (!firmwarePart) throw new Error("Could not find firmware part in manifest.");
+        
+        const response = await fetch(firmwarePart.path);
+        if (!response.ok) throw new Error(`Failed to fetch firmware: ${response.statusText}`);
+        const firmwareData = new Uint8Array(await response.arrayBuffer());
 
+        log('Searching for default PSK in firmware binary...');
+        const pskOffset = findSubarray(firmwareData, DEFAULT_PSK);
+
+        if (pskOffset === -1) {
+          throw new Error("Default PSK not found in firmware binary. Is it already patched or a different version?");
+        }
+        log(`✅ Default PSK found at offset 0x${pskOffset.toString(16)}. Patching...`);
+
+        const pskBytes = new Uint8Array(PSK_LENGTH);
+        for (let i = 0; i < PSK_LENGTH; i++) {
+          pskBytes[i] = parseInt(sessionPsk.substring(i * 2, i * 2 + 2), 16);
+        }
+        
+        firmwareData.set(pskBytes, pskOffset);
+
+        const patchedBlob = new Blob([firmwareData], { type: 'application/octet-stream' });
+        patchedFirmwareUrl = URL.createObjectURL(patchedBlob);
+        
+        log('✅ Secure firmware is generated and ready to be flashed.');
+        flashBtn.disabled = false;
+        downloadSecureBtn.disabled = false;
+
+      } catch(e) {
+        log(`Error preparing secure firmware: ${e.message}`, 'error');
+        sessionPskDisplay.textContent = "Error! Check console.";
+        sessionPskDisplay.style.color = 'var(--error-color)';
         flashBtn.disabled = true;
-      } catch (e) {
-        log("❌ Flash error: " + e.message);
       }
+    }
+
+    installButton.patchManifest = async (manifest) => {
+      const mode = document.querySelector('input[name="flashMode"]:checked').value;
+
+      if (mode === 'compatibility') {
+        log('Flashing in Compatibility Mode (using default PSK)');
+        return manifest;
+      }
+
+      if (mode === 'secure') {
+        if (!patchedFirmwareUrl || !sessionPsk) {
+          log('Secure firmware has not been generated or failed to generate. Cannot flash.', 'error');
+          return null;
+        }
+        const obfuscatedPsk = '**************************' + sessionPsk.slice(-6);
+        log(`Flashing in Secure Mode with session PSK: ${obfuscatedPsk}`);
+        const firmwarePart = manifest.builds[0].parts.find(part => part.path.includes("sketch_jun11a.ino.merged.bin"));
+        firmwarePart.path = patchedFirmwareUrl;
+        return manifest;
+      }
+    };
+    
+    // --- UI Event Listeners ---
+    document.querySelectorAll('input[name="flashMode"]').forEach(radio => {
+      radio.addEventListener('change', (e) => {
+        const isSecureMode = e.target.value === 'secure';
+        secureModeControls.style.display = isSecureMode ? 'block' : 'none';
+        compatibilityModeControls.style.display = isSecureMode ? 'none' : 'block';
+        
+        if (isSecureMode && !patchedFirmwareUrl) {
+          prepareSecureFirmware();
+        } else {
+          flashBtn.disabled = false;
+        }
+      });
     });
+
+    downloadSecureBtn.addEventListener('click', () => {
+        if (!patchedFirmwareUrl || !sessionPsk) {
+            log('Secure firmware not available for download.', 'error');
+            return;
+        }
+        const a = document.createElement('a');
+        a.href = patchedFirmwareUrl;
+        a.download = `secure_firmware_${sessionPsk.slice(-6)}.bin`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        log(`Downloading secure firmware: ${a.download}`);
+    });
+
+    // --- ESP Web Tools Event Listeners ---
+    installButton.addEventListener('state-changed', (e) => {
+      const state = e.detail;
+      log(`State: ${state}`);
+      if (state === 'PREPARING' || state === 'UPLOADING') {
+        if (logContainer.classList.contains('minimized')) logHeader.click();
+        bootPrompt.classList.add('show');
+      } else {
+        bootPrompt.classList.remove('show');
+      }
+      if (state === 'FINISHED') log('✅ Flash complete! Press RESET button on ESP32.', 'success');
+      if (state === 'ERROR') log('❌ Flash failed. Try the BOOT button procedure.', 'error');
+    });
+
+    installButton.addEventListener('error', (e) => log(`Error: ${e.detail}`, 'error'));
+
+    // Check manifest/firmware files on load
+    fetch('./manifest.json').then(r => r.ok ? log('manifest.json found') : Promise.reject(`HTTP ${r.status}`)).catch(e => log(`manifest.json error: ${e}`, 'error'));
+    fetch('./sketch_jun11a.ino.merged.bin', { method: 'HEAD' }).then(r => r.ok ? log('sketch_jun11a.ino.merged.bin found') : Promise.reject(`HTTP ${r.status}`)).catch(e => log(`sketch_jun11a.ino.merged.bin error: ${e}`, 'error'));
+    
+    log('Ready to flash. Select a mode and click the button to begin.');
   </script>
 </body>
 </html>
