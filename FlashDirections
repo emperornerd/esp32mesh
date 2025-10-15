@@ -1,152 +1,179 @@
-AI generated. Not fully proofed as of 6/24/25. - Repo Author
+ESP32 Protest Node — Flashing Instructions
+1. Web-Based Flash Tool
+1.1. Open the Flasher
+In your browser, open the index.html from this repository.
 
-Here are step-by-step instructions for a typical user to flash the ESP32 mesh node code onto their ESP32 board. This guide assumes you are using the Arduino IDE, which is a common environment for ESP32 development.
+The tool will detect:
 
-Prerequisites
-Before you start, make sure you have the following:
+Browser User Agent & Platform
 
-ESP32 Development Board: Any ESP32 board (e.g., ESP32-DevKitC, ESP32 WROOM-32) with a micro-USB cable.
+Secure Context (HTTPS vs. HTTP)
 
-Computer: A desktop or laptop running Windows, macOS, or Linux.
+Web Serial API availability
 
-Internet Connection: Required for downloading software and libraries.
+1.2. Select Flash Mode
+Compatibility Mode – Leaves the factory pre-shared key in place. – Click Download Unmodified Firmware if you want the raw BIN.
 
-Step 1: Install Arduino IDE
-If you don't already have it, download and install the Arduino IDE:
+Secure Mode – Generates a fresh 128 bit PSK, patches the binary in-browser, and lets you download a session-unique BIN. – Wait until the console logs “✅ Secure firmware … ready.” then click Download Patched Secure Firmware.
 
-Go to the official Arduino website: https://www.arduino.cc/en/software
+1.3. Flash via Web Serial
+Click Flash Firmware.
 
-Download the installer appropriate for your operating system.
+A serial-port chooser will appear; pick your ESP32’s COM port.
 
-Follow the installation prompts to complete the setup.
+The console panel will prompt:
 
-Step 2: Add ESP32 Board Manager URL to Arduino IDE
-The Arduino IDE needs to know how to work with ESP32 boards.
+Press BOOT if the automatic reset fails.
 
-Open the Arduino IDE.
+On success: “✅ Flash complete! Press RESET on ESP32.”
 
-Go to File > Preferences (or Arduino > Preferences on macOS).
+The tool toggles RTS/DTR lines to enter the ESP32’s bootloader. If flashing stalls, see 4. ESP32 Boot Modes below.
 
-In the "Additional Boards Manager URLs" field, paste the following URL:
+2. Downloading & Flashing with Arduino IDE or esptool.py
+2.1. Download the BIN
+Compatibility Mode → unmodified_firmware.bin
 
-https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+Secure Mode → secure_firmware_<last6PSK>.bin
 
-If there are already URLs, separate them with a comma.
+2.2. Flash with Arduino IDE
+Install the ESP32 board support via Boards Manager.
 
-Click OK.
+Open Tools → Board → ESP32 Dev Module.
 
-Step 3: Install ESP32 Boards
-Now, install the ESP32 board definitions using the Boards Manager:
+Select your Port.
 
-Go to Tools > Board > Boards Manager...
+Upload a binary:
 
-In the Boards Manager search bar, type esp32.
+Sketch → Export Compiled Binary (if using the .ino source).
 
-Locate "esp32 by Espressif Systems" and click Install. This may take a few minutes to download and install.
+Or Tools → “Upload Using Programmer” → select your downloaded BIN.
 
-Close the Boards Manager once the installation is complete.
+After upload finishes, press RESET on the board.
 
-Step 4: Select Your ESP32 Board
-After installing the board definitions, select your specific ESP32 board.
+nope, no. the web flasher will be available online, they won't have to setup IIS for it. i can't give you a url yet, but assume it exists and they know where
+Flashing Instructions
+These instructions cover three ways to load firmware onto your ESP32 Protest Node:
 
-Connect your ESP32 board to your computer using a micro-USB cable.
+the online Web Flasher,
 
-Go to Tools > Board > ESP32 Arduino.
+downloading and flashing BIN files with Arduino IDE,
 
-Select your specific ESP32 board model (e.g., "ESP32 Dev Module", "ESP32 WROOM Module"). If you're unsure, "ESP32 Dev Module" is often a good default.
+flashing downloaded BINs via esptool.py.
 
-Go to Tools > Port and select the serial port connected to your ESP32. This will vary depending on your system (e.g., COM3 on Windows, /dev/cu.SLAB_USBtoUART on macOS, /dev/ttyUSB0 on Linux).
+They also explain ESP32 bootloader nuances and recovery steps.
 
-Step 5: Install Required Libraries
-The provided code uses specific libraries.
+1. Web Flasher (Online)
+Your team host a web-based flasher at a known URL (e.g. https://flasher.example.com). No local server setup is required.
 
-Go to Sketch > Include Library > Manage Libraries...
+1.1 Access the Tool
+Open your browser and navigate to the flasher URL.
 
-In the Library Manager search bar, search for TFT_eSPI.
+The page will display your browser, platform, secure‐context and Web Serial API status.
 
-Locate "TFT_eSPI by Bodmer" and click Install. (Note: The code uses #define USE_DISPLAY true, so this library is required. If you do not have a TFT display, you could comment out or change USE_DISPLAY to false in the code later, but it's good to install it for now.)
+1.2 Choose Flash Mode
+Compatibility Mode
 
-Close the Library Manager.
+Uses the built-in default PSK.
 
-Important Note for DNS Server: The code also explicitly requires DNSServer.h. This library is typically included with the ESP32 core, so you shouldn't need to install it separately via the Library Manager. If you encounter an error related to DNSServer.h, ensure your ESP32 board installation (Step 3) was successful.
+Click Download Unmodified Firmware if you want a .bin file for manual flashing.
 
-Step 6: Prepare the Code
-The code you have is likely in a raw text format.
+Secure Mode
 
-Copy all the C++ code from your code_canvas immersive.
+Generates a session-unique PSK, patches the binary in-browser, and updates the manifest.
 
-In the Arduino IDE, go to File > New to open a new sketch.
+Wait for the console log to show “✅ Secure firmware … ready,” then click Download Patched Secure Firmware (optional; you can flash directly).
 
-Delete any existing code in the new sketch window and paste the copied code into it.
+1.3 Flash via Web Serial
+Click the Flash Firmware button.
 
-Save the sketch. Go to File > Save As... and create a new folder with the same name as the sketch file (e.g., esp32_mesh_node) and save the .ino file inside it.
+In the serial-port chooser, select your ESP32’s port (COMx or /dev/ttyUSBx).
 
-Step 7: Configure Trusted MAC Addresses (Crucial!)
-The code has a section for trustedMACs. You must update this with the actual MAC addresses of all ESP32 nodes you intend to use in your mesh network.
+The console panel shows state changes:
 
-Find your ESP32's MAC Address:
+When you see PREPARING or UPLOADING, the tool toggles DTR/RTS to reset and enter bootloader.
 
-For the ESP32 you are about to flash: Open a new sketch in Arduino IDE, paste the following code, upload it, and open the Serial Monitor (Tools > Serial Monitor).
+If upload stalls, use the manual boot procedure below.
 
-#include <WiFi.h>
-void setup() {
-  Serial.begin(115200);
-  Serial.print("ESP32 MAC Address: ");
-  Serial.println(WiFi.macAddress());
-}
-void loop() {}
+On FINISHED, press RESET on your ESP32 to start the new firmware.
 
-Note down the MAC address (e.g., 14:33:5C:06:3A:99). Repeat this for all your ESP32 boards.
+On ERROR, review the console log and follow the manual-boot guidance.
 
-Update trustedMACs in your main code:
+2. Manual BIN Download & Arduino IDE
+If you prefer Arduino IDE or have large fleets to script, download the BIN and use your favorite toolchain.
 
-In the main ESP32 mesh node code you pasted in Step 6, find the const uint8_t trustedMACs[][6] = { ... } section.
+2.1 Download the BIN File
+Compatibility Mode: unmodified_firmware.bin
 
-Replace the example MAC addresses with your actual MAC addresses, formatted as hex bytes.
+Secure Mode: secure_firmware_<last6charsOfPSK>.bin
 
-Example: If your MAC is 14:33:5C:06:3A:99, it becomes {0x14, 0x33, 0x5C, 0x06, 0x3A, 0x99}.
+2.2 Flash with Arduino IDE
+Install ESP32 by Espressif Systems via Boards Manager.
 
-Ensure numTrusted (calculated automatically) is correct based on the number of MACs you've listed.
+Open the Protest Node sketch (ProtestNode.ino) from this repo.
 
-Example (after modification):
+Select Tools → Board → ESP32 Dev Module.
 
-const uint8_t trustedMACs[][6] = {
-  {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF},    // Your first ESP32's MAC
-  {0x01, 0x23, 0x45, 0x67, 0x89, 0xAB},    // Your second ESP32's MAC
-  {0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x23}     // Your third ESP32's MAC
-  // Add more if you have them
-};
+Select the correct Port.
 
-Crucial: All ESP32s in your mesh must have the same trustedMACs array for proper communication and re-broadcasting.
+Click Upload.
 
-Step 8: Upload the Code
-Finally, upload the code to your ESP32 board.
+The IDE compiles and invokes esptool.py under the hood.
 
-In the Arduino IDE, click the Upload button (right arrow icon) in the toolbar.
+If it hangs, enter manual boot mode (see below).
 
-The Arduino IDE will compile the code and then attempt to upload it to your ESP32.
+After upload completes, press RESET on the board.
 
-If uploading fails: You might need to put your ESP32 into "flashing mode".
+3. Command-Line Flashing with esptool.py
+Ideal for scripting or CI builds.
 
-Hold down the BOOT (or FLASH) button on your ESP32 board.
+Install Python package:
 
-While holding BOOT, press the EN (or RESET) button once, then release EN.
+bash
+pip install esptool
+Plug in your ESP32 and identify its port (e.g. COM3 or /dev/ttyUSB0).
 
-Continue holding BOOT.
+Run:
 
-Click the Upload button in the Arduino IDE.
+bash
+esptool.py --chip esp32 \
+  --port /dev/ttyUSB0 \
+  --baud 460800 \
+  write_flash -z \
+  0x1000 path/to/your_firmware.bin
+When done, press RESET on the ESP32.
 
-Once the upload starts (you'll see "Connecting..." and then progress percentages), you can release the BOOT button.
+4. ESP32 Bootloader & Boot Modes
+ESP32 boards enter the on-chip ROM bootloader when GPIO0 (BOOT) is held LOW during reset. Most dev boards wire in two buttons:
 
-If the upload is successful, you will see "Done uploading." in the status bar.
+EN (RESET): Resets the chip.
 
-Step 9: Monitor the ESP32 (Optional but Recommended)
-You can view the serial output from your ESP32 to see its activity.
+BOOT (GPIO0): When held down during EN press, enters bootloader mode.
 
-In the Arduino IDE, go to Tools > Serial Monitor.
+4.1 Automatic Reset (Web Flasher / Arduino IDE)
+Tools toggle DTR/RTS signals to pulse EN and BOOT for you.
 
-Ensure the baud rate is set to 115200 (matching Serial.begin(115200) in the code).
+If CTS/RTS wiring differs or the USB-serial adapter lacks control lines, the automatic entry may fail.
 
-You should see messages indicating the node starting, its MAC address, IP, and received/sent messages.
+4.2 Manual Boot-Mode Entry
+Unplug USB or disconnect power.
 
-Repeat these steps for all ESP32 boards you want to be part of your mesh network, ensuring each is flashed with the same code and the complete list of trusted MAC addresses.
+Press and hold BOOT (GPIO0) button.
+
+While holding BOOT, press and release EN (RESET).
+
+Release BOOT.
+
+The red LED may blink slowly—ESP32 is now in bootloader mode.
+
+Run your flash command or click Flash Firmware again.
+
+4.3 Common Recovery Tips
+Ensure a high-quality, data-capable USB cable.
+
+Close other serial-monitor applications.
+
+If you see garbage output, verify baud rate (115200 for console, 460800 or 921600 for flashing).
+
+On clone boards, try slower baud rates (e.g. 115200).
+
+Verify drivers (Windows → CP210x / CH340 / FTDI).
