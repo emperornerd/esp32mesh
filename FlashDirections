@@ -1,57 +1,5 @@
-ESP32 Protest Node — Flashing Instructions
-1. Web-Based Flash Tool
-1.1. Open the Flasher
-In your browser, open the index.html from this repository.
+# A live version of this flasher is available, here: https://fuckups.net/mesh/index.html
 
-The tool will detect:
-
-Browser User Agent & Platform
-
-Secure Context (HTTPS vs. HTTP)
-
-Web Serial API availability
-
-1.2. Select Flash Mode
-Compatibility Mode – Leaves the factory pre-shared key in place. – Click Download Unmodified Firmware if you want the raw BIN.
-
-Secure Mode – Generates a fresh 128 bit PSK, patches the binary in-browser, and lets you download a session-unique BIN. – Wait until the console logs “✅ Secure firmware … ready.” then click Download Patched Secure Firmware.
-
-1.3. Flash via Web Serial
-Click Flash Firmware.
-
-A serial-port chooser will appear; pick your ESP32’s COM port.
-
-The console panel will prompt:
-
-Press BOOT if the automatic reset fails.
-
-On success: “✅ Flash complete! Press RESET on ESP32.”
-
-The tool toggles RTS/DTR lines to enter the ESP32’s bootloader. If flashing stalls, see 4. ESP32 Boot Modes below.
-
-2. Downloading & Flashing with Arduino IDE or esptool.py
-2.1. Download the BIN
-Compatibility Mode → unmodified_firmware.bin
-
-Secure Mode → secure_firmware_<last6PSK>.bin
-
-2.2. Flash with Arduino IDE
-Install the ESP32 board support via Boards Manager.
-
-Open Tools → Board → ESP32 Dev Module.
-
-Select your Port.
-
-Upload a binary:
-
-Sketch → Export Compiled Binary (if using the .ino source).
-
-Or Tools → “Upload Using Programmer” → select your downloaded BIN.
-
-After upload finishes, press RESET on the board.
-
-nope, no. the web flasher will be available online, they won't have to setup IIS for it. i can't give you a url yet, but assume it exists and they know where
-Flashing Instructions
 These instructions cover three ways to load firmware onto your ESP32 Protest Node:
 
 the online Web Flasher,
@@ -63,10 +11,10 @@ flashing downloaded BINs via esptool.py.
 They also explain ESP32 bootloader nuances and recovery steps.
 
 1. Web Flasher (Online)
-Your team host a web-based flasher at a known URL (e.g. https://flasher.example.com). No local server setup is required.
 
 1.1 Access the Tool
 Open your browser and navigate to the flasher URL.
+# You can use this one if you like: https://fuckups.net/mesh/index.html
 
 The page will display your browser, platform, secure‐context and Web Serial API status.
 
