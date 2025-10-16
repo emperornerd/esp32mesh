@@ -125,6 +125,7 @@
     /* Secondary buttons, e.g., download */
     .btn-secondary {
       background: var(--secondary-color);
+      color: var(--dark-text); /* Ensure dark text for contrast on lighter secondary color */
       padding: 12px 24px;
       font-size: 16px;
     }
@@ -162,6 +163,103 @@
       font-size: 14px;
       line-height: 1.6;
       border: 1px solid var(--border-color);
+    }
+
+    .mode-explainer {
+      background: linear-gradient(135deg, rgba(0, 102, 204, 0.1), rgba(204, 102, 0, 0.1));
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 18px 20px;
+      margin: 20px 0;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    
+    .mode-explainer h4 {
+      margin: 0 0 12px 0;
+      font-size: 15px;
+      color: var(--light-text);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    
+    .mode-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 15px;
+      margin-top: 12px;
+    }
+    
+    .mode-card {
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 12px;
+    }
+    
+    .mode-card h5 {
+      margin: 0 0 8px 0;
+      font-size: 14px;
+      color: #8ab4f8;
+    }
+    
+    .mode-card p {
+      margin: 0;
+      color: var(--medium-text);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .psk-display-wrapper {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        margin-top: 20px;
+        gap: 10px;
+    }
+    
+    #sessionPskDisplay {
+        font-family: 'Consolas', monospace;
+        font-size: 14px;
+        background: var(--dark-text);
+        padding: 10px;
+        border-radius: 4px;
+        border: 1px solid var(--border-color);
+        color: var(--light-text);
+        flex-grow: 1;
+        max-width: 400px;
+        text-align: left;
+    }
+
+    /* NEW STYLES for subtle refresh button */
+    #clearPskBtn {
+        background: var(--medium-bg);
+        color: var(--secondary-color);
+        border: 1px solid var(--border-color);
+        width: 40px;
+        height: 40px;
+        padding: 0;
+        border-radius: 50%;
+        font-size: 20px;
+        line-height: 1;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        transition: background-color 0.2s, color 0.2s;
+        flex-shrink: 0;
+    }
+    #clearPskBtn:hover {
+        background: var(--secondary-color);
+        color: var(--light-text);
+        transform: rotate(-30deg);
+        transform-origin: center;
+    }
+    
+    @media (max-width: 768px) {
+      .mode-grid {
+        grid-template-columns: 1fr;
+      }
     }
     
     /* Console Panel - Left Side */
@@ -245,20 +343,28 @@
     <div class="container">
       <h1>Protest Node Flash Tool</h1>
       
-      <div class="info-box">
-        <div class="info-row"><span class="info-label">User Agent:</span><span class="info-value" id="browser"></span></div>
-        <div class="info-row"><span class="info-label">Platform:</span><span class="info-value" id="platform"></span></div>
-        <div class="info-row"><span class="info-label">Secure Context:</span><span class="info-value" id="secure"></span></div>
-        <div class="info-row"><span class="info-label">Web Serial API:</span><span class="info-value" id="serial"></span></div>
-      </div>
-
       <div class="warning">
         <strong>⚠️ Before flashing:</strong>
         <ul>
           <li>Close any serial monitor programs (Arduino IDE, PuTTY, etc.)</li>
           <li>Close any other browser tabs using the ESP32</li>
           <li>Unplug and replug your ESP32 if needed</li>
+		  <li>If you have trouble connecting to the next device after a flash (if applicable) refresh the web page. If in secure mode, your session will be retained.</li>
         </ul>
+      </div>
+
+      <div class="mode-explainer">
+        <h4>🔐 Understanding Flash Modes</h4>
+        <div class="mode-grid">
+          <div class="mode-card">
+            <h5>Compatibility Mode</h5>
+            <p>Uses the default symmetric key included in the public code. Suitable for testing but not secure for production deployment. All devices share the same PSK (encryption password, essentially). This means an adversary can extract the key from your source or firmware and inject or intercept traffic. This may be acceptable for testing or smaller events less likely to be directly targeted. The benefit is it’s easy to expand and use (you won’t have to reflash all your devices when you add more nodes or figure out how to use a BIN file).</p>
+          </div>
+          <div class="mode-card">
+            <h5>Secure Mode</h5>
+            <p>Generates a unique session PSK and patches the firmware before flashing. Each session uses a different key, replacing the public default PSK (encryption password, essentially) for enhanced security. All nodes must be flashed to that key, so either flash them all in one website session, or download the firmware (bin) and load it with Arduino IDE (for example). These nodes will not be able to communicate with nodes using the default key in compatibility mode. The nodes will have to all be reflashed upon getting new nodes OR you have to download and use the BIN instead of using the web flasher. If you fail to download the BIN on the first flash, all devices will have to be reflashed.</p>
+          </div>
+        </div>
       </div>
 
       <div class="boot-prompt" id="bootPrompt">
@@ -267,8 +373,8 @@
       </div>
 
       <div class="flash-mode-section">
-        <label><input type="radio" name="flashMode" value="compatibility" checked> Compatibility Mode</label>
-        <label><input type="radio" name="flashMode" value="secure"> Secure Mode</label>
+        <label><input type="radio" name="flashMode" value="compatibility" id="radioCompatibility"> Compatibility Mode</label>
+        <label><input type="radio" name="flashMode" value="secure" id="radioSecure"> Secure Mode</label>
       </div>
       
       <div id="compatibility-mode-controls" style="text-align: center; margin: 20px 0;">
@@ -276,35 +382,45 @@
             <button class="btn btn-secondary">Download Unmodified Firmware</button>
          </a>
          <p style="font-size: 12px; color: var(--error-color); margin-top: 10px; max-width: 450px; margin-left: auto; margin-right: auto;">
-            <strong>Warning:</strong> This firmware is unmodified and uses a default, insecure key. It should only be used for testing purposes.
+            <strong>Warning:</strong> This firmware is unmodified and uses a default, insecure key. It should only be used for testing purposes or situations where the threat is lower (smaller protests or other contexts where a compromise has less significant consequences).
          </p>
       </div>
 
       <div id="secure-mode-controls" style="display: none; text-align: center; margin: 20px 0;">
-        <div id="sessionPskDisplay" style="font-family: 'Consolas', monospace; font-size: 14px; background: var(--dark-text); padding: 10px; border-radius: 4px; border: 1px solid var(--border-color); color: var(--medium-text);">
-          Session PSK will be generated automatically...
+        
+        <div class="psk-display-wrapper">
+            <div id="sessionPskDisplay">
+              Session PSK will be generated automatically...
+            </div>
+             <button id="clearPskBtn" title="Start New Secure Session (Clear Key)">
+                &#x21BB; </button>
         </div>
+        
         <button id="downloadSecureBtn" class="btn btn-secondary" style="margin-top: 15px;" disabled>
           Download Patched Secure Firmware
         </button>
       </div>
 
-      <div class="button-container">
-        <esp-web-install-button manifest="./manifest.json" id="installButton" hide-logs>
-          <button slot="activate" id="flashBtn" class="btn">
-            ⚡ Flash Firmware
-          </button>
-        </esp-web-install-button>
-      </div>
+      <div class="button-container" id="buttonContainer">
+        </div>
 
       <div class="instructions">
         <h3>📋 Instructions</h3>
         <ol>
           <li>Connect your ESP32 to your computer via USB.</li>
           <li>Select your flashing mode. For Secure Mode, a key is generated for your session automatically.</li>
-          <li>Click "Flash Firmware" and select the ESP32 port from the popup.</li>
-          <li>Wait for flashing to complete, then press RESET on your ESP32.</li>
+          <li>Click **"Flash Firmware"** and select the ESP32 port from the popup.</li>
+          <li>Wait for flashing to complete. </li>
+          <li>Press RESET on your ESP32 after the flash is complete. </li>
+		  <li>If you have trouble connecting to the next device (if applicable) refresh the web page. If in secure mode, your session will be retained.</li>
         </ol>
+      </div>
+
+      <div class="info-box">
+        <div class="info-row"><span class="info-label">User Agent:</span><span class="info-value" id="browser"></span></div>
+        <div class="info-row"><span class="info-label">Platform:</span><span class="info-value" id="platform"></span></div>
+        <div class="info-row"><span class="info-label">Secure Context:</span><span class="info-value" id="secure"></span></div>
+        <div class="info-row"><span class="info-label">Web Serial API:</span><span class="info-value" id="serial"></span></div>
       </div>
     </div>
   </div>
@@ -322,22 +438,28 @@
     const secureEl = document.getElementById('secure');
     const logEl = document.getElementById('log');
     const bootPrompt = document.getElementById('bootPrompt');
-    const installButton = document.getElementById('installButton');
     const logContainer = document.getElementById('logContainer');
     const resizeHandle = document.getElementById('resizeHandle');
     const logHeader = document.getElementById('logHeader');
     const mainContent = document.getElementById('mainContent');
+    const buttonContainer = document.getElementById('buttonContainer');
     
     // UI ELEMENTS
-    const flashBtn = document.getElementById('flashBtn');
     const secureModeControls = document.getElementById('secure-mode-controls');
     const compatibilityModeControls = document.getElementById('compatibility-mode-controls');
     const sessionPskDisplay = document.getElementById('sessionPskDisplay');
     const downloadSecureBtn = document.getElementById('downloadSecureBtn');
+    const clearPskBtn = document.getElementById('clearPskBtn');
+    const radioCompatibility = document.getElementById('radioCompatibility');
+    const radioSecure = document.getElementById('radioSecure');
+
+    // Use 'let' for the install button so it can be reassigned during a reset
+    let installButton;
 
     // SESSION VARIABLES for secure flashing
     let patchedFirmwareUrl = null;
-    let sessionPsk = null;
+    let sessionPsk = sessionStorage.getItem('sessionPsk');
+    let isResetting = false;
 
     // Display system info
     browserEl.textContent = navigator.userAgent;
@@ -399,8 +521,9 @@
     }
 
     async function prepareSecureFirmware() {
+      const flashBtn = document.getElementById('flashBtn');
       log('Preparing Secure Firmware for this session...');
-      flashBtn.disabled = true;
+      if(flashBtn) flashBtn.disabled = true;
       downloadSecureBtn.disabled = true;
       sessionPskDisplay.textContent = 'Generating key and patching firmware...';
       sessionPskDisplay.style.color = 'var(--medium-text)';
@@ -410,10 +533,17 @@
       }
       
       try {
-        sessionPsk = generateHexKey(PSK_LENGTH);
+        if (!sessionPsk) {
+            sessionPsk = generateHexKey(PSK_LENGTH);
+            sessionStorage.setItem('sessionPsk', sessionPsk);
+            log('🔑 Generated new Secure Session PSK and saved to session storage.');
+        } else {
+             log('🔑 Loaded existing Secure Session PSK from session storage.');
+        }
+
         const obfuscatedPsk = '**************************' + sessionPsk.slice(-6);
         log('****************************************************************');
-        log(`🔑 New Secure Session PSK: ${obfuscatedPsk}`);
+        log(`🔒 Current Secure Session PSK: ${obfuscatedPsk}`);
         log('   This key will be used for all devices flashed in this session.');
         log('****************************************************************');
         sessionPskDisplay.textContent = `Session PSK: ${obfuscatedPsk}`;
@@ -446,29 +576,56 @@
         patchedFirmwareUrl = URL.createObjectURL(patchedBlob);
         
         log('✅ Secure firmware is generated and ready to be flashed.');
-        flashBtn.disabled = false;
+        if(flashBtn) flashBtn.disabled = false;
         downloadSecureBtn.disabled = false;
 
       } catch(e) {
         log(`Error preparing secure firmware: ${e.message}`, 'error');
         sessionPskDisplay.textContent = "Error! Check console.";
         sessionPskDisplay.style.color = 'var(--error-color)';
-        flashBtn.disabled = true;
+        if(flashBtn) flashBtn.disabled = true;
       }
     }
 
-    installButton.patchManifest = async (manifest) => {
-      const mode = document.querySelector('input[name="flashMode"]:checked').value;
+    // --- AGGRESSIVE COMPONENT RESET LOGIC ---
+    
+    function createFlasherComponent() {
+      buttonContainer.innerHTML = '';
+      
+      const newInstallButton = document.createElement('esp-web-install-button');
+      newInstallButton.setAttribute('manifest', './manifest.json');
+      newInstallButton.innerHTML = `<button slot="activate" id="flashBtn" class="btn">⚡ Flash Firmware</button>`;
+      
+      buttonContainer.appendChild(newInstallButton);
+      
+      installButton = newInstallButton;
+      attachFlasherListeners();
+      isResetting = false;
+    }
 
+    // --- ESP Web Tools Event Handlers ---
+
+    const patchManifestFn = async (manifest) => {
+      const observer = new MutationObserver((mutations, obs) => {
+        const dialog = document.querySelector("ewt-dialog");
+        if (dialog && dialog.shadowRoot) {
+          const style = document.createElement('style');
+          style.textContent = `[part="dialog-header-actions"] { display: none !important; }`;
+          dialog.shadowRoot.appendChild(style);
+          obs.disconnect(); 
+        }
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+
+      const mode = document.querySelector('input[name="flashMode"]:checked').value;
       if (mode === 'compatibility') {
         log('Flashing in Compatibility Mode (using default PSK)');
         return manifest;
       }
-
       if (mode === 'secure') {
         if (!patchedFirmwareUrl || !sessionPsk) {
-          log('Secure firmware has not been generated or failed to generate. Cannot flash.', 'error');
-          return null;
+          log('Secure firmware has not been generated. Cannot flash.', 'error');
+          throw new Error("Secure firmware not ready.");
         }
         const obfuscatedPsk = '**************************' + sessionPsk.slice(-6);
         log(`Flashing in Secure Mode with session PSK: ${obfuscatedPsk}`);
@@ -477,17 +634,87 @@
         return manifest;
       }
     };
+
+    const onStateChanged = (e) => {
+      const state = e.detail;
+      if (isResetting) return;
+      log(`State: ${state}`);
+      
+      const isWorking = ['PREPARING', 'UPLOADING', 'INITIALIZING'].includes(state);
+      bootPrompt.classList.toggle('show', isWorking);
+
+      const isFinished = ['FINISHED', 'ERROR', 'DASHBOARD'].includes(state);
+
+      if (isFinished) {
+        if (isResetting) return;
+        isResetting = true;
+
+        if (state === 'FINISHED') {
+          log('✅ Flash complete! Press RESET button on ESP32.', 'success');
+          log('   Tool is resetting. Ready for the next device...');
+          // NEW FEATURE: Post-flash alert
+          alert("Flash Complete! The tool has reset for the next device. If you cannot flash the next device (e.g., the browser does not show the port selection dialog), please refresh the page and try again.");
+        } else if (state === 'ERROR') {
+          log('❌ Flash failed. Try unplugging/replugging the device and the BOOT button procedure.', 'error');
+          log('   Tool is resetting...');
+        } else if (state === 'DASHBOARD') {
+           log('ℹ️ Operation cancelled or closed. Resetting tool...');
+        }
+        
+        setTimeout(() => {
+          const dialog = document.querySelector("ewt-dialog");
+          if (dialog) {
+            dialog.close();
+          }
+          createFlasherComponent();
+        }, 1500); // 1.5-second delay before reset
+      }
+    };
+
+    const onError = (e) => {
+      if (isResetting) return;
+      log(`Error: ${e.detail.message || e.detail}`, 'error');
+    };
+
+    function attachFlasherListeners() {
+      if (!installButton) return;
+      installButton.patchManifest = patchManifestFn;
+      installButton.addEventListener('state-changed', onStateChanged);
+      installButton.addEventListener('error', onError);
+    }
+
+    function initFlashMode() {
+        let savedMode = sessionStorage.getItem('flashMode') || 'compatibility';
+        
+        if (savedMode === 'secure') {
+            radioSecure.checked = true;
+            secureModeControls.style.display = 'block';
+            compatibilityModeControls.style.display = 'none';
+        } else {
+            radioCompatibility.checked = true;
+            secureModeControls.style.display = 'none';
+            compatibilityModeControls.style.display = 'block';
+        }
+
+        if (savedMode === 'secure') {
+            prepareSecureFirmware();
+        }
+    }
     
     // --- UI Event Listeners ---
     document.querySelectorAll('input[name="flashMode"]').forEach(radio => {
       radio.addEventListener('change', (e) => {
-        const isSecureMode = e.target.value === 'secure';
+        const mode = e.target.value;
+        sessionStorage.setItem('flashMode', mode);
+
+        const isSecureMode = mode === 'secure';
         secureModeControls.style.display = isSecureMode ? 'block' : 'none';
         compatibilityModeControls.style.display = isSecureMode ? 'none' : 'block';
         
-        if (isSecureMode && !patchedFirmwareUrl) {
+        const flashBtn = document.getElementById('flashBtn');
+        if (isSecureMode) {
           prepareSecureFirmware();
-        } else {
+        } else if (flashBtn) {
           flashBtn.disabled = false;
         }
       });
@@ -507,27 +734,44 @@
         log(`Downloading secure firmware: ${a.download}`);
     });
 
-    // --- ESP Web Tools Event Listeners ---
-    installButton.addEventListener('state-changed', (e) => {
-      const state = e.detail;
-      log(`State: ${state}`);
-      if (state === 'PREPARING' || state === 'UPLOADING') {
-        if (logContainer.classList.contains('minimized')) logHeader.click();
-        bootPrompt.classList.add('show');
-      } else {
-        bootPrompt.classList.remove('show');
-      }
-      if (state === 'FINISHED') log('✅ Flash complete! Press RESET button on ESP32.', 'success');
-      if (state === 'ERROR') log('❌ Flash failed. Try the BOOT button procedure.', 'error');
+    // Handle the subtle reset key action
+    clearPskBtn.addEventListener('click', () => {
+        if (!confirm('Are you sure you want to clear the current session key? This will require you to re-flash ALL your devices with the new key.')) {
+            return;
+        }
+        sessionStorage.removeItem('sessionPsk');
+        sessionPsk = null; 
+        patchedFirmwareUrl = null; 
+        log('Security key cleared. A new key will be generated immediately.');
+        sessionPskDisplay.textContent = 'Session PSK cleared. Generating new key...';
+        sessionPskDisplay.style.color = 'var(--medium-text)';
+        downloadSecureBtn.disabled = true;
+        
+        if (document.querySelector('input[name="flashMode"]:checked').value === 'secure') {
+            // Force re-generation
+            prepareSecureFirmware();
+        }
     });
 
-    installButton.addEventListener('error', (e) => log(`Error: ${e.detail}`, 'error'));
+    // --- Initial Setup ---
+    (async () => {
+      try {
+        const manifestRes = await fetch('./manifest.json');
+        if (!manifestRes.ok) throw new Error(`manifest.json HTTP ${manifestRes.status}`);
+        log('manifest.json found');
 
-    // Check manifest/firmware files on load
-    fetch('./manifest.json').then(r => r.ok ? log('manifest.json found') : Promise.reject(`HTTP ${r.status}`)).catch(e => log(`manifest.json error: ${e}`, 'error'));
-    fetch('./sketch_jun11a.ino.merged.bin', { method: 'HEAD' }).then(r => r.ok ? log('sketch_jun11a.ino.merged.bin found') : Promise.reject(`HTTP ${r.status}`)).catch(e => log(`sketch_jun11a.ino.merged.bin error: ${e}`, 'error'));
-    
-    log('Ready to flash. Select a mode and click the button to begin.');
+        const firmwareRes = await fetch('./sketch_jun11a.ino.merged.bin', { method: 'HEAD' });
+        if (!firmwareRes.ok) throw new Error(`sketch_jun11a.ino.merged.bin HTTP ${firmwareRes.status}`);
+        log('sketch_jun11a.ino.merged.bin found');
+      } catch (e) {
+        log(e.message, 'error');
+      }
+
+      initFlashMode();
+      createFlasherComponent();
+      log('Ready to flash. Select a mode and click the button to begin.');
+    })();
+
   </script>
 </body>
 </html>
