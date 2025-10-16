@@ -33,6 +33,8 @@ const int WIFI_CHANNEL = 1;
 const int WEB_SERVER_PORT = 80;
 const IPAddress AP_IP(192, 168, 4, 1);
 const IPAddress NET_MASK(255, 255, 255, 0);
+const int MAX_AP_CONNECTIONS = 8; // Max clients for our AP
+const unsigned long AP_INACTIVITY_TIMEOUT_SEC = 600; // 10 minutes to drop inactive clients
 
 // --- Message & Protocol Constants ---
 // Maximum content length, must be a multiple of 16 for AES. Total message size is 238 bytes.
@@ -146,6 +148,8 @@ unsigned long lastSeenPeersManage = 0;
 const unsigned long PEER_DISCOVERY_INTERVAL_MS = 15000;
 unsigned long lastDiscoveryBroadcast = 0;
 const unsigned long AUTO_REBROADCAST_INTERVAL_MS = 30000;
+const unsigned long AP_MANAGEMENT_INTERVAL_MS = 5000; // Interval to check AP status
+unsigned long lastApManagement = 0;
 
 DNSServer dnsServer;
 
@@ -391,8 +395,10 @@ void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_mes
     }
   }
   if (!updated) {
+    // Prune old messages, but never prune a PASSWORD_UPDATE message
     seenMessages.erase(std::remove_if(seenMessages.begin(), seenMessages.end(),
                                      [currentTime](const SeenMessage& msg) {
+                                         // This logic correctly keeps PASSWORD_UPDATE messages forever
                                          if (msg.messageData.messageType == MSG_TYPE_PASSWORD_UPDATE) {
                                              return false;
                                          }
@@ -400,6 +406,7 @@ void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_mes
                                      }),
                       seenMessages.end());
 
+    // Manage cache size, ensuring we don't discard a PASSWORD_UPDATE message
     if (seenMessages.size() >= MAX_CACHE_SIZE) {
       auto oldest = std::min_element(seenMessages.begin(), seenMessages.end(),
                                      [](const SeenMessage& a, const SeenMessage& b) {
@@ -411,16 +418,11 @@ void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_mes
         seenMessages.erase(oldest);
       }
     }
-
+    
+    // The message being passed in (msgData) is already encrypted correctly by the caller.
+    // Just store it directly, but reset the TTL for our own rebroadcasts.
     esp_now_message_t storedMessage = msgData;
     storedMessage.ttl = MAX_TTL_HOPS;
-
-    // Encrypt content with the correct key before storing in cache
-    const uint8_t* keyToUse = PRE_SHARED_KEY;
-    if (useSessionKey && storedMessage.messageType != MSG_TYPE_PASSWORD_UPDATE) {
-        keyToUse = sessionKey;
-    }
-    aesCtrEncrypt((uint8_t*)storedMessage.content, MAX_MESSAGE_CONTENT_LEN, storedMessage.messageID, storedMessage.originalSenderMac, keyToUse);
 
     SeenMessage newMessage = {id, {0}, currentTime, storedMessage};
     memcpy(newMessage.originalSenderMac, mac, 6);
@@ -540,10 +542,11 @@ void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len,
   if (type == MSG_TYPE_DISCOVERY || type == MSG_TYPE_STATUS_REQUEST || type == MSG_TYPE_STATUS_RESPONSE || type == MSG_TYPE_JAMMING_ALERT) {
       return;
   }
-
+  
+  // Pass the already-encrypted message to the cache.
   addOrUpdateMessageToSeen(newMessage.messageID, newMessage.originalSenderMac, newMessage);
 
-  // Add to local display log immediately for originating node
+  // Add to local display log immediately for originating node (must decrypt a copy first)
   portENTER_CRITICAL(&localDisplayLogMutex);
   esp_now_message_t displayMessage = newMessage;
   aesCtrDecrypt((uint8_t*)displayMessage.content, MAX_MESSAGE_CONTENT_LEN, displayMessage.messageID, displayMessage.originalSenderMac, keyToUse);
@@ -661,7 +664,12 @@ void setup() {
   ssid = "ProtestInfo_" + MAC_suffix_str;
 
   WiFi.softAPConfig(AP_IP, AP_IP, NET_MASK);
-  WiFi.softAP(ssid.c_str(), nullptr, WIFI_CHANNEL);
+  // Configure AP with a max number of connections. SSID is initially visible (param 4 is 0).
+  WiFi.softAP(ssid.c_str(), nullptr, WIFI_CHANNEL, 0, MAX_AP_CONNECTIONS);
+  
+  // Set a timeout to automatically disconnect inactive clients to free up slots.
+  esp_wifi_set_inactive_time(WIFI_IF_AP, AP_INACTIVITY_TIMEOUT_SEC);
+
   IP = WiFi.softAPIP();
   server.begin();
 
@@ -714,6 +722,7 @@ void setup() {
   lastLocalDisplayLogManage = millis();
   lastSeenPeersManage = millis();
   lastNvsWrite = millis();
+  lastApManagement = millis();
 }
 
 String buildQueryString(const String& sessionToken, bool showPublic, bool showUrgent, bool hideSystem) {
@@ -898,26 +907,28 @@ void loop() {
         // MODIFICATION: Block password changes if already set, but after logging infiltration attempt.
         if (passwordChangeLocked) {
             if(VERBOSE_MODE) Serial.println("Received password update but local password is locked. Ignoring update.");
-            continue; // Drop the message from further processing (no key change, no caching, no rebroadcast).
-        }
-
-        if (!wasAlreadySeen) {
-            if(VERBOSE_MODE) Serial.println("Received password update command via mesh.");
-            deriveAndSetSessionKey(String(incomingMessage.content));
-            if(VERBOSE_MODE) {
-              Serial.println("Organizer password updated via mesh. Node is now capable of sending messages.");
-              Serial.printf("Password updated via OTA. Requesting public status from sender %02X:%02X:%02X:%02X:%02X:%02X\n", incomingMessage.originalSenderMac[0], incomingMessage.originalSenderMac[1], incomingMessage.originalSenderMac[2], incomingMessage.originalSenderMac[3], incomingMessage.originalSenderMac[4], incomingMessage.originalSenderMac[5]);
+            // Continue processing to ensure the valid password update is still rebroadcast for new nodes.
+        } else { // Only change local key if not locked
+            if (!wasAlreadySeen) {
+                if(VERBOSE_MODE) Serial.println("Received password update command via mesh.");
+                deriveAndSetSessionKey(String(incomingMessage.content));
+                if(VERBOSE_MODE) {
+                  Serial.println("Organizer password updated via mesh. Node is now capable of sending messages.");
+                  Serial.printf("Password updated via OTA. Requesting public status from sender %02X:%02X:%02X:%02X:%02X:%02X\n", incomingMessage.originalSenderMac[0], incomingMessage.originalSenderMac[1], incomingMessage.originalSenderMac[2], incomingMessage.originalSenderMac[3], incomingMessage.originalSenderMac[4], incomingMessage.originalSenderMac[5]);
+                }
+                createAndSendMessage("", 0, MSG_TYPE_STATUS_REQUEST, incomingMessage.originalSenderMac);
             }
-            createAndSendMessage("", 0, MSG_TYPE_STATUS_REQUEST, incomingMessage.originalSenderMac);
         }
         skipDisplayLog = true;
     }
-
-    esp_now_message_t encryptedForCache = incomingMessage;
-    const uint8_t* keyToUseForCache = PRE_SHARED_KEY;
+    
+    // For every message that isn't a discovery/status message, prepare it for caching and potential rebroadcast
+    esp_now_message_t encryptedForCache = incomingMessage; // incomingMessage is plaintext
+    const uint8_t* keyToUseForCache = PRE_SHARED_KEY; // Default to PSK
     if(useSessionKey && encryptedForCache.messageType != MSG_TYPE_PASSWORD_UPDATE) {
-        keyToUseForCache = sessionKey;
+        keyToUseForCache = sessionKey; // Use session key for normal traffic
     }
+    // Encrypt the message content before caching
     aesCtrEncrypt((uint8_t*)encryptedForCache.content, MAX_MESSAGE_CONTENT_LEN, encryptedForCache.messageID, encryptedForCache.originalSenderMac, keyToUseForCache);
     addOrUpdateMessageToSeen(encryptedForCache.messageID, encryptedForCache.originalSenderMac, encryptedForCache);
 
@@ -933,13 +944,8 @@ void loop() {
             portEXIT_CRITICAL(&localDisplayLogMutex);
         }
         if (incomingMessage.ttl > 0) {
-            esp_now_message_t encryptedForRebroadcast = incomingMessage;
-            const uint8_t* keyToUseForRebroadcast = PRE_SHARED_KEY;
-            if(useSessionKey && encryptedForRebroadcast.messageType != MSG_TYPE_PASSWORD_UPDATE) {
-                keyToUseForRebroadcast = sessionKey;
-            }
-            aesCtrEncrypt((uint8_t*)encryptedForRebroadcast.content, MAX_MESSAGE_CONTENT_LEN, encryptedForRebroadcast.messageID, encryptedForRebroadcast.originalSenderMac, keyToUseForRebroadcast);
-            sendToAllPeers(encryptedForRebroadcast);
+            // Re-use the already encrypted version we prepared for the cache
+            sendToAllPeers(encryptedForCache);
         } else {
             if(VERBOSE_MODE) Serial.println("Message reached TTL limit, not re-broadcasting.");
         }
@@ -1078,6 +1084,29 @@ void loop() {
           }
       }
       portEXIT_CRITICAL(&espNowAddedPeersMutex);
+  }
+
+  // --- AP Management: Dynamic SSID Broadcast ---
+  if (millis() - lastApManagement >= AP_MANAGEMENT_INTERVAL_MS) {
+    lastApManagement = millis();
+
+    // Dynamically hide/show the SSID based on whether the AP is full.
+    // This prevents user frustration from trying to connect to a full AP.
+    wifi_config_t conf;
+    esp_wifi_get_config((wifi_interface_t)WIFI_IF_AP, &conf);
+    int num_stations = WiFi.softAPgetStationNum();
+
+    if (num_stations >= MAX_AP_CONNECTIONS && conf.ap.ssid_hidden == 0) {
+        // AP is full, hide SSID
+        conf.ap.ssid_hidden = 1;
+        esp_wifi_set_config((wifi_interface_t)WIFI_IF_AP, &conf);
+        if(VERBOSE_MODE) Serial.printf("AP is full (%d clients). Hiding SSID.\n", num_stations);
+    } else if (num_stations < MAX_AP_CONNECTIONS && conf.ap.ssid_hidden == 1) {
+        // AP has free slots, show SSID
+        conf.ap.ssid_hidden = 0;
+        esp_wifi_set_config((wifi_interface_t)WIFI_IF_AP, &conf);
+        if(VERBOSE_MODE) Serial.printf("AP has a free slot (%d/%d clients). Broadcasting SSID.\n", num_stations, MAX_AP_CONNECTIONS);
+    }
   }
 
   WiFiClient client = server.available();
@@ -1349,7 +1378,9 @@ void loop() {
             client.println(F("Pragma: no-cache"));
             client.println(F("Expires: 0"));
             client.println();
-            client.println(F("<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Protest Info Node</title><style>"));
+            client.println(F("<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Protest Info Node</title>"));
+            client.println(F("<meta http-equiv=\"refresh\" content=\"120\">")); // Auto-refresh page every 120 seconds
+            client.println(F("<style>"));
             client.println(F("body{font-family:Helvetica,Arial,sans-serif;margin:0;padding:0;background-color:#f8f8f8;color:#333;display:flex;flex-direction:column;min-height:100vh;}"));
             client.println(F("header{background-color:#f0f0f0;padding:10px 15px;border-bottom:1px solid #ddd;text-align:center; display: flex; flex-direction: column; align-items: center; justify-content: center; width:100%;}"));
             client.println(F("h1,h2,h3{margin:0;padding:5px 0;color:#333;text-align:center;} h1{font-size:1.4em;} h2{font-size:1.2em;} h3{font-size:1.1em;margin-bottom:10px;}"));
