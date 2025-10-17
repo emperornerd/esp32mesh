@@ -90,6 +90,8 @@ bool publicMessagingEnabled = false; // Volatile
 bool publicMessagingLocked = false;  // Volatile
 bool passwordChangeLocked = false; // Volatile: True if organizer password has been set
 bool isOrganizerSessionActive = false;
+// --- NEW --- Global flag to track which security model is active
+bool isUsingDefaultPsk = false; 
 
 int loginAttempts = 0;
 unsigned long lockoutTime = 0;
@@ -642,10 +644,37 @@ void setup() {
   infiltrationIncidentCount = preferences.getUInt("infilCount", 0);
   lastInfiltrationTimestampPersisted = preferences.getULong("infilLastTs", 0);
   if (VERBOSE_MODE) Serial.printf("Loaded from NVS -> Jamming: %u, Hash Failures: %u, Infiltration Attempts: %u\n", jammingIncidentCount, hashFailureCount, infiltrationIncidentCount);
+  
+  // --- START MODIFIED LOGIC ---
+  // Determine operational mode based on the PSK at boot time.
 
-  // The node will always start without a session key.
-  // Set the initial web UI password to the default value. This is ONLY for login.
-  hashedOrganizerPassword = simpleHash(WEB_PASSWORD);
+  // Define the factory key again for comparison.
+  const uint8_t FACTORY_KEY[] = {
+    0x7C, 0xE3, 0x91, 0x2F, 0xA8, 0x5D, 0xB4, 0x69,
+    0x3E, 0xC7, 0x14, 0xF2, 0x86, 0x0B, 0xD9, 0x4A
+  };
+
+  if (memcmp(PRE_SHARED_KEY, FACTORY_KEY, sizeof(FACTORY_KEY)) == 0) {
+    // The key IS the default factory key.
+    isUsingDefaultPsk = true;
+    if(VERBOSE_MODE) Serial.println("Operating Mode: Compatibility. Awaiting organizer password to secure mesh.");
+    // Set the initial web UI password to the default value. This is ONLY for login.
+    hashedOrganizerPassword = simpleHash(WEB_PASSWORD);
+  } else {
+    // The key IS NOT the default. It was flashed by the secure tool.
+    isUsingDefaultPsk = false;
+    if(VERBOSE_MODE) Serial.println("Operating Mode: Secure. Flashed PSK is the final mesh key.");
+    
+    // Immediately adopt the flashed key as the session key for mesh communication.
+    memcpy(sessionKey, PRE_SHARED_KEY, 16);
+    useSessionKey = true;
+    
+    // Set the initial web UI password to the default value. The organizer will
+    // need to log in with "password" and then set a new HUMAN-READABLE password
+    // for future UI logins. This new password will NOT change the mesh key.
+    hashedOrganizerPassword = simpleHash(WEB_PASSWORD);
+  }
+  // --- END MODIFIED LOGIC ---
 
   WiFi.mode(WIFI_AP_STA);
   WiFi.setSleep(false);
@@ -856,6 +885,8 @@ void loop() {
     }
 
     if (incomingMessage.messageType == MSG_TYPE_PASSWORD_UPDATE) {
+        // This message type is only processed by devices in Compatibility Mode (isUsingDefaultPsk = true)
+        
         // --- START: Infiltration Detection Logic ---
         String newPasswordHash = simpleHash(String(incomingMessage.content));
         unsigned long currentTime = millis();
@@ -904,10 +935,9 @@ void loop() {
         }
         // --- END: Infiltration Detection Logic ---
 
-        // MODIFICATION: Block password changes if already set, but after logging infiltration attempt.
+        // Block password changes if already set, but after logging infiltration attempt.
         if (passwordChangeLocked) {
             if(VERBOSE_MODE) Serial.println("Received password update but local password is locked. Ignoring update.");
-            // Continue processing to ensure the valid password update is still rebroadcast for new nodes.
         } else { // Only change local key if not locked
             if (!wasAlreadySeen) {
                 if(VERBOSE_MODE) Serial.println("Received password update command via mesh.");
@@ -1323,7 +1353,7 @@ void loop() {
                       webFeedbackMessage = "<p class='feedback' style='color:green;'>Re-broadcasted " + String(rebroadcastedCount) + " messages!</p>";
                   } else { webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Not logged in as organizer or node's password not set.</p>"; }
               } else if (actionParam == "setOrganizerPassword") {
-                  // MODIFICATION: Implement password lock. Once set, it cannot be changed until reboot.
+                  // --- START MODIFIED PASSWORD LOGIC ---
                   if (passwordChangeLocked) {
                       webFeedbackMessage = "<p class='feedback' style='color:red;'>The organizer password for this node cannot be changed after it has been set. To reset the password, you must reboot the board.</p>";
                   } else { // This block only runs if the password has NOT been set yet.
@@ -1333,13 +1363,24 @@ void loop() {
                       } else if (decodedNewPassword != decodedConfirmNewPassword) {
                           webFeedbackMessage = "<p class='feedback' style='color:red;'>New passwords do not match. Please try again.</p>";
                       } else {
-                          deriveAndSetSessionKey(decodedNewPassword);
+                          // The action depends on the mode detected at boot.
+                          if (isUsingDefaultPsk) {
+                              // Compatibility Mode: Derive a new key and broadcast it.
+                              if(VERBOSE_MODE) Serial.println("Setting password in Compatibility Mode. Deriving and broadcasting new session key.");
+                              deriveAndSetSessionKey(decodedNewPassword);
+                              createAndSendMessage(decodedNewPassword.c_str(), decodedNewPassword.length(), MSG_TYPE_PASSWORD_UPDATE);
+                          } else {
+                              // Secure Flash Mode: Only update the web UI login password. Do NOT change the mesh key.
+                              if(VERBOSE_MODE) Serial.println("Setting password in Secure Mode. Updating web UI login hash only.");
+                              hashedOrganizerPassword = simpleHash(decodedNewPassword);
+                              passwordChangeLocked = true; // Lock from further changes.
+                          }
                           webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer password updated successfully!</p>";
                           loginAttempts = 0;
                           lockoutTime = 0;
-                          createAndSendMessage(decodedNewPassword.c_str(), decodedNewPassword.length(), MSG_TYPE_PASSWORD_UPDATE);
                       }
                   }
+                  // --- END MODIFIED PASSWORD LOGIC ---
               }
               client.println(F("HTTP/1.1 303 See Other"));
               String redirectQuery = currentQueryParams;
@@ -1552,7 +1593,11 @@ void loop() {
                     client.println(F("<label for='new_pass_input'>New Password:</label><input type='password' id='new_pass_input' name='new_password' required>"));
                     client.println(F("<label for='confirm_new_pass_input'>Confirm New Password:</label><input type='password' id='confirm_new_pass_input' name='confirm_new_password' required>"));
                     client.println(F("<input type='submit' value='Set New Password' class='button-link'></form>"));
-                    client.println(F("<p class='feedback' style='color:blue; font-size:0.8em; margin-top:10px;'>Setting a new password will distribute it to the mesh, replacing any existing password.</p>"));
+                    if (isUsingDefaultPsk) {
+                        client.println(F("<p class='feedback' style='color:blue; font-size:0.8em; margin-top:10px;'>Setting a new password will distribute it to the mesh, replacing any existing password.</p>"));
+                    } else {
+                        client.println(F("<p class='feedback' style='color:blue; font-size:0.8em; margin-top:10px;'>This node was flashed with a secure key. Setting a password here will ONLY change the web login password and will NOT affect mesh encryption.</p>"));
+                    }
                 }
                 client.println(F("</div></details>"));
 
@@ -1573,7 +1618,11 @@ void loop() {
                     client.println(F("<label for='new_pass_input'>New Password:</label><input type='password' id='new_pass_input' name='new_password' required>"));
                     client.println(F("<label for='confirm_new_pass_input'>Confirm New Password:</label><input type='password' id='confirm_new_pass_input' name='confirm_new_password' required>"));
                     client.println(F("<input type='submit' value='Set Password' class='button-link' style='background-color:#007bff; width: auto;'></form>"));
-                    client.println(F("<p class='feedback' style='color:blue; font-size:0.8em; margin-top:10px;'>Set the mesh-wide password. After setting, you must log in with this password to access organizer functions.</p>"));
+                    if (isUsingDefaultPsk) {
+                        client.println(F("<p class='feedback' style='color:blue; font-size:0.8em; margin-top:10px;'>Set the mesh-wide password. After setting, you must log in with this password to access organizer functions.</p>"));
+                    } else {
+                        client.println(F("<p class='feedback' style='color:blue; font-size:0.8em; margin-top:10px;'>This node was flashed with a secure key. Set the web login password here. This will NOT affect mesh encryption.</p>"));
+                    }
                     client.println(F("</div></details>"));
                 } else {
                     // If password IS set, then show the standard login form.
