@@ -162,11 +162,18 @@ unsigned long lastApManagement = 0;
 
 DNSServer dnsServer;
 
-// The default factory key, used ONLY for bootstrapping (distributing the session key).
+// --- START FLASHER FIX ---
+// The default factory key.
+// THIS ARRAY MUST BE 20 BYTES LONG.
+// The first 4 bytes (DE AD BE EF) are "magic bytes" that the web flasher
+// searches for. The flasher then *replaces* the 16 bytes that follow.
 const uint8_t PRE_SHARED_KEY[] = {
-  0x7C, 0xE3, 0x91, 0x2F, 0xA8, 0x5D, 0xB4, 0x69,
+  0xDE, 0xAD, 0xBE, 0xEF, // 4-byte Magic prefix for the flasher
+  0x7C, 0xE3, 0x91, 0x2F, 0xA8, 0x5D, 0xB4, 0x69, // 16-byte Default PSK
   0x3E, 0xC7, 0x14, 0xF2, 0x86, 0x0B, 0xD9, 0x4A
 };
+// --- END FLASHER FIX ---
+
 // The session key, derived from the organizer password, used for all other traffic.
 uint8_t sessionKey[16]; // Volatile
 bool useSessionKey = false; // Volatile
@@ -485,7 +492,8 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
   qMsg.timestamp = millis();
 
   // Decrypt content using the appropriate key.
-  const uint8_t* keyToUse = PRE_SHARED_KEY;
+  // --- FLASHER FIX: Use (PRE_SHARED_KEY + 4) to skip magic bytes ---
+  const uint8_t* keyToUse = PRE_SHARED_KEY + 4;
   if (useSessionKey && qMsg.messageData.messageType != MSG_TYPE_PASSWORD_UPDATE) {
       keyToUse = sessionKey;
   }
@@ -593,7 +601,8 @@ void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len,
 
 
   // Determine the key to use for HMAC and Encryption
-  const uint8_t* keyToUse = PRE_SHARED_KEY; // Default to factory key
+  // --- FLASHER FIX: Use (PRE_SHARED_KEY + 4) to skip magic bytes ---
+  const uint8_t* keyToUse = PRE_SHARED_KEY + 4; // Default to factory key
   if (useSessionKey && type != MSG_TYPE_PASSWORD_UPDATE) {
       keyToUse = sessionKey;
   }
@@ -742,12 +751,14 @@ void setup() {
   // Determine operational mode based on the PSK at boot time.
 
   // Define the factory key again for comparison.
+  // This is the known, default key. It is only used to check if the active key has been changed.
   const uint8_t FACTORY_KEY[] = {
     0x7C, 0xE3, 0x91, 0x2F, 0xA8, 0x5D, 0xB4, 0x69,
     0x3E, 0xC7, 0x14, 0xF2, 0x86, 0x0B, 0xD9, 0x4A
   };
 
-  if (memcmp(PRE_SHARED_KEY, FACTORY_KEY, sizeof(FACTORY_KEY)) == 0) {
+  // --- FLASHER FIX: Compare (PRE_SHARED_KEY + 4) to skip magic bytes ---
+  if (memcmp(PRE_SHARED_KEY + 4, FACTORY_KEY, sizeof(FACTORY_KEY)) == 0) {
     // The key IS the default factory key.
     isUsingDefaultPsk = true;
     if(VERBOSE_MODE) Serial.println("Operating Mode: Compatibility. Awaiting organizer password to secure mesh.");
@@ -759,7 +770,8 @@ void setup() {
     if(VERBOSE_MODE) Serial.println("Operating Mode: Secure. Flashed PSK is the final mesh key.");
     
     // Immediately adopt the flashed key as the session key for mesh communication.
-    memcpy(sessionKey, PRE_SHARED_KEY, 16);
+    // --- FLASHER FIX: Copy from (PRE_SHARED_KEY + 4) to skip magic bytes ---
+    memcpy(sessionKey, PRE_SHARED_KEY + 4, 16);
     useSessionKey = true;
     
     // Set the initial web UI password to the default value. The organizer will
@@ -940,7 +952,8 @@ void loop() {
         }
         // Need to re-create the [HMAC | payload] structure for caching
         esp_now_message_t encryptedForCache = incomingMessage;
-        const uint8_t* keyToUse = useSessionKey ? sessionKey : PRE_SHARED_KEY;
+        // --- FLASHER FIX: Use (PRE_SHARED_KEY + 4) to skip magic bytes ---
+        const uint8_t* keyToUse = useSessionKey ? sessionKey : (PRE_SHARED_KEY + 4);
         
         char payload_for_hmac[MAX_PAYLOAD_LEN];
         strncpy(payload_for_hmac, incomingMessage.content, MAX_PAYLOAD_LEN - 1);
@@ -992,77 +1005,88 @@ void loop() {
     }
 
     if (incomingMessage.messageType == MSG_TYPE_PASSWORD_UPDATE) {
-        // This message type is only processed by devices in Compatibility Mode (isUsingDefaultPsk = true)
+        // --- START VULNERABILITY PATCH ---
+        // A device in "Secure Mode" (flashed with a secure PSK) MUST NEVER
+        // accept an over-the-air password update. It already has the final key.
+        if (!isUsingDefaultPsk) {
+            if(VERBOSE_MODE) Serial.println("Ignoring MSG_TYPE_PASSWORD_UPDATE: Node is in Secure Mode.");
+            skipDisplayLog = true; 
+        } else {
+        // --- END VULNERABILITY PATCH ---
         
-        // --- START: Infiltration Detection Logic ---
-        String newPasswordHash = simpleHash(String(incomingMessage.content));
-        unsigned long currentTime = millis();
-
-        portENTER_CRITICAL(&passwordUpdateHistoryMutex);
-        // 1. Prune old entries from history
-        passwordUpdateHistory.erase(std::remove_if(passwordUpdateHistory.begin(), passwordUpdateHistory.end(),
-            [currentTime](const PasswordUpdateEvent& event) {
-                return (currentTime - event.timestamp) > INFILTRATION_WINDOW_MS;
-            }), passwordUpdateHistory.end());
-
-        // 2. Add the new event
-        PasswordUpdateEvent newEvent;
-        newEvent.timestamp = currentTime;
-        newEvent.passwordHash = newPasswordHash;
-        memcpy(newEvent.senderMac, incomingMessage.originalSenderMac, 6);
-        passwordUpdateHistory.push_back(newEvent);
-
-        // 3. Check for conflicting passwords
-        std::set<String> uniqueHashesInWindow;
-        for (const auto& event : passwordUpdateHistory) {
-            uniqueHashesInWindow.insert(event.passwordHash);
-        }
-        portEXIT_CRITICAL(&passwordUpdateHistoryMutex);
-
-        if (uniqueHashesInWindow.size() > INFILTRATION_THRESHOLD) {
-            if (!isInfiltrationAlert) {
-                if(VERBOSE_MODE) Serial.println("INFILTRATION ATTEMPT DETECTED: Multiple conflicting passwords received in a short period.");
-                isInfiltrationAlert = true;
-                lastInfiltrationEventTimestamp = millis();
-                infiltrationIncidentCount++;
-                lastInfiltrationTimestampPersisted = millis();
-                securityCountersDirty = true;
-
-                // Log the MAC of the sender that triggered the alert
-                uint8_t infilLogIndex = preferences.getUChar("infilLogIdx", 0);
-                String logData = formatMac(incomingMessage.originalSenderMac);
-                String key = "infilMsg" + String(infilLogIndex);
-                preferences.putString(key.c_str(), logData);
-                infilLogIndex = (infilLogIndex + 1) % MAX_INFIL_LOG_ENTRIES;
-                preferences.putUChar("infilLogIdx", infilLogIndex);
-                if (VERBOSE_MODE) Serial.printf("Logged infiltration attempt from %s. Total attempts: %u\n", formatMac(incomingMessage.originalSenderMac).c_str(), infiltrationIncidentCount);
-
-                addDisplayLog("Infiltration Alert!");
+            // This message type is only processed by devices in Compatibility Mode (isUsingDefaultPsk = true)
+            
+            // --- START: Infiltration Detection Logic ---
+            String newPasswordHash = simpleHash(String(incomingMessage.content));
+            unsigned long currentTime = millis();
+    
+            portENTER_CRITICAL(&passwordUpdateHistoryMutex);
+            // 1. Prune old entries from history
+            passwordUpdateHistory.erase(std::remove_if(passwordUpdateHistory.begin(), passwordUpdateHistory.end(),
+                [currentTime](const PasswordUpdateEvent& event) {
+                    return (currentTime - event.timestamp) > INFILTRATION_WINDOW_MS;
+                }), passwordUpdateHistory.end());
+    
+            // 2. Add the new event
+            PasswordUpdateEvent newEvent;
+            newEvent.timestamp = currentTime;
+            newEvent.passwordHash = newPasswordHash;
+            memcpy(newEvent.senderMac, incomingMessage.originalSenderMac, 6);
+            passwordUpdateHistory.push_back(newEvent);
+    
+            // 3. Check for conflicting passwords
+            std::set<String> uniqueHashesInWindow;
+            for (const auto& event : passwordUpdateHistory) {
+                uniqueHashesInWindow.insert(event.passwordHash);
             }
-        }
-        // --- END: Infiltration Detection Logic ---
-
-        // Block password changes if already set, but after logging infiltration attempt.
-        if (passwordChangeLocked) {
-            if(VERBOSE_MODE) Serial.println("Received password update but local password is locked. Ignoring update.");
-        } else { // Only change local key if not locked
-            if (!wasAlreadySeen) {
-                if(VERBOSE_MODE) Serial.println("Received password update command via mesh.");
-                deriveAndSetSessionKey(String(incomingMessage.content));
-                if(VERBOSE_MODE) {
-                  Serial.println("Organizer password updated via mesh. Node is now capable of sending messages.");
-                  Serial.printf("Password updated via OTA. Requesting public status from sender %02X:%02X:%02X:%02X:%02X:%02X\n", incomingMessage.originalSenderMac[0], incomingMessage.originalSenderMac[1], incomingMessage.originalSenderMac[2], incomingMessage.originalSenderMac[3], incomingMessage.originalSenderMac[4], incomingMessage.originalSenderMac[5]);
+            portEXIT_CRITICAL(&passwordUpdateHistoryMutex);
+    
+            if (uniqueHashesInWindow.size() > INFILTRATION_THRESHOLD) {
+                if (!isInfiltrationAlert) {
+                    if(VERBOSE_MODE) Serial.println("INFILTRATION ATTEMPT DETECTED: Multiple conflicting passwords received in a short period.");
+                    isInfiltrationAlert = true;
+                    lastInfiltrationEventTimestamp = millis();
+                    infiltrationIncidentCount++;
+                    lastInfiltrationTimestampPersisted = millis();
+                    securityCountersDirty = true;
+    
+                    // Log the MAC of the sender that triggered the alert
+                    uint8_t infilLogIndex = preferences.getUChar("infilLogIdx", 0);
+                    String logData = formatMac(incomingMessage.originalSenderMac);
+                    String key = "infilMsg" + String(infilLogIndex);
+                    preferences.putString(key.c_str(), logData);
+                    infilLogIndex = (infilLogIndex + 1) % MAX_INFIL_LOG_ENTRIES;
+                    preferences.putUChar("infilLogIdx", infilLogIndex);
+                    if (VERBOSE_MODE) Serial.printf("Logged infiltration attempt from %s. Total attempts: %u\n", formatMac(incomingMessage.originalSenderMac).c_str(), infiltrationIncidentCount);
+    
+                    addDisplayLog("Infiltration Alert!");
                 }
-                createAndSendMessage("", 0, MSG_TYPE_STATUS_REQUEST, incomingMessage.originalSenderMac);
             }
-        }
-        skipDisplayLog = true;
+            // --- END: Infiltration Detection Logic ---
+    
+            // Block password changes if already set, but after logging infiltration attempt.
+            if (passwordChangeLocked) {
+                if(VERBOSE_MODE) Serial.println("Received password update but local password is locked. Ignoring update.");
+            } else { // Only change local key if not locked
+                if (!wasAlreadySeen) {
+                    if(VERBOSE_MODE) Serial.println("Received password update command via mesh.");
+                    deriveAndSetSessionKey(String(incomingMessage.content));
+                    if(VERBOSE_MODE) {
+                      Serial.println("Organizer password updated via mesh. Node is now capable of sending messages.");
+                      Serial.printf("Password updated via OTA. Requesting public status from sender %02X:%02X:%02X:%02X:%02X:%02X\n", incomingMessage.originalSenderMac[0], incomingMessage.originalSenderMac[1], incomingMessage.originalSenderMac[2], incomingMessage.originalSenderMac[3], incomingMessage.originalSenderMac[4], incomingMessage.originalSenderMac[5]);
+                    }
+                    createAndSendMessage("", 0, MSG_TYPE_STATUS_REQUEST, incomingMessage.originalSenderMac);
+                }
+            }
+            skipDisplayLog = true;
+        } // --- VULNERABILITY PATCH: Added closing brace ---
     }
     
     // For every message that isn't a discovery/status message, prepare it for caching and potential rebroadcast
     // We must re-create the [HMAC | payload] structure and re-encrypt it for the cache
     esp_now_message_t encryptedForCache = incomingMessage; // incomingMessage has plaintext *payload only*
-    const uint8_t* keyToUseForCache = PRE_SHARED_KEY; // Default to PSK
+    // --- FLASHER FIX: Use (PRE_SHARED_KEY + 4) to skip magic bytes ---
+    const uint8_t* keyToUseForCache = PRE_SHARED_KEY + 4; // Default to PSK
     if(useSessionKey && encryptedForCache.messageType != MSG_TYPE_PASSWORD_UPDATE) {
         keyToUseForCache = sessionKey; // Use session key for normal traffic
     }
@@ -1526,9 +1550,14 @@ void loop() {
             const int MAX_NODES_TO_DISPLAY_WEB = 4;
             for (const auto& macPair : sortedSeenPeers) {
                 if (count >= MAX_NODES_TO_DISPLAY_WEB) break;
-                uint8_t macBytes[6]; unsigned int tempMac[6];
-                sscanf(macPair.first.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", &tempMac[0], &tempMac[1], &tempMac[2], &tempMac[3], &tempMac[4], &tempMac[5]);
-                for (int k = 0; k < 6; ++k) macBytes[k] = (uint8_t)tempMac[k];
+                
+                // --- START FIX ---
+                // Directly parse into uint8_t array using %hhX specifier
+                uint8_t macBytes[6];
+                sscanf(macPair.first.c_str(), "%02hhX:%02hhX:%02hhX:%02hhX:%02hhX:%02hhX",
+                       &macBytes[0], &macBytes[1], &macBytes[2], &macBytes[3], &macBytes[4], &macBytes[5]);
+                // --- END FIX ---
+
                 detectedNodesHtmlContent += "<span class='detected-node-item-compact'>" + formatMaskedMac(macBytes) + "</span>";
                 count++;
             }
@@ -1867,9 +1896,14 @@ void displayDeviceInfoMode() {
   else {
     for (const auto& macPair : sortedSeenPeers) {
         if (linesPrinted >= MAX_NODES_TO_DISPLAY_TFT) break;
-        uint8_t macBytes[6]; unsigned int tempMac[6];
-        sscanf(macPair.first.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X", &tempMac[0], &tempMac[1], &tempMac[2], &tempMac[3], &tempMac[4], &tempMac[5]);
-        for (int k = 0; k < 6; ++k) { macBytes[k] = (uint8_t)tempMac[k]; }
+        
+        // --- START FIX ---
+        // Directly parse into uint8_t array using %hhX specifier
+        uint8_t macBytes[6];
+        sscanf(macPair.first.c_str(), "%02hhX:%02hhX:%02hhX:%02hhX:%02hhX:%02hhX",
+               &macBytes[0], &macBytes[1], &macBytes[2], &macBytes[3], &macBytes[4], &macBytes[5]);
+        // --- END FIX ---
+
         tft.printf("  %s (seen %lu s ago)\n", formatMaskedMac(macBytes).c_str(), (millis() - macPair.second) / 1000);
         linesPrinted++;
     }
@@ -1893,26 +1927,38 @@ void displayStatsInfoMode() {
   tft.printf("  Urgent Messages: %lu\n", totalUrgentMessages);
   tft.printf("  Cache Size: %u/%u\n", seenMessages.size(), MAX_CACHE_SIZE);
   tft.println("Mode Status:");
-  tft.printf("  Public Msgs: %s\n", publicMessagingEnabled ? "ENABLED" : "DISABLED");
-  tft.printf("  Public Lock: %s\n", publicMessagingLocked ? "LOCKED" : "UNLOCKED");
-  tft.printf("  Node Capable: %s\n", passwordChangeLocked ? "YES" : "NO");
+  tft.printf("  Security Mode: %s\n", isUsingDefaultPsk ? "Compatibility" : "Secure");
+  tft.print("  Active Key:    ");
+  if (useSessionKey) {
+      // This is true in Secure mode, or in Compat mode after a password is set.
+      tft.printf("Session ...%02X%02X\n", sessionKey[14], sessionKey[15]);
+  } else {
+      // This is only true in Compat mode before a password is set (using the default factory key).
+      // The key bytes start at index 4 of PRE_SHARED_KEY. Last two bytes are at index 18 and 19.
+      tft.printf("Default ...%02X%02X\n", PRE_SHARED_KEY[18], PRE_SHARED_KEY[19]);
+  }
+  tft.printf("  Public Msgs:   %s\n", publicMessagingEnabled ? "ENABLED" : "DISABLED");
+  tft.printf("  Public Lock:   %s\n", publicMessagingLocked ? "LOCKED" : "UNLOCKED");
+  tft.printf("  Node Capable:  %s\n", passwordChangeLocked ? "YES" : "NO");
   portENTER_CRITICAL(&apClientsMutex);
   int uniqueClients = apConnectedClients.size();
   portEXIT_CRITICAL(&apClientsMutex);
   tft.println("AP Stats:");
   tft.printf("  Unique Clients: %d\n", uniqueClients);
+  
   tft.println("Network Security:");
+  tft.printf("  HMAC Failures: %u\n", hashFailureCount);
+  tft.printf("  Current Jamming: %s\n", isCurrentlyJammed ? "YES" : "NO");
   tft.printf("  Jamming Incidents: %u\n", jammingIncidentCount);
   if(jammingIncidentCount > 0 && lastJammingTimestampPersisted > 0) {
       tft.printf("    Last: %lu s ago\n", (millis() - lastJammingTimestampPersisted) / 1000);
       tft.printf("    Dur: %lu ms\n", lastJammingDurationPersisted);
   }
-  tft.printf("  HMAC Failures: %u\n", hashFailureCount);
+  tft.printf("  Infiltration Alert: %s\n", isInfiltrationAlert ? "YES" : "NO");
   tft.printf("  Infiltration Attempts: %u\n", infiltrationIncidentCount);
   if(infiltrationIncidentCount > 0 && lastInfiltrationTimestampPersisted > 0) {
       tft.printf("    Last: %lu s ago\n", (millis() - lastInfiltrationTimestampPersisted) / 1000);
   }
-  tft.printf("  Current Jamming: %s\n", (lastJammingEventTimestamp > 0) ? "YES" : "NO");
-  tft.printf("  Infiltration Alert: %s\n", isInfiltrationAlert ? "YES" : "NO");
 }
 #endif
+
