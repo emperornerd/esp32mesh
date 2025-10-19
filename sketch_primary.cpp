@@ -1004,20 +1004,24 @@ void loop() {
         continue;
     }
 
-    if (incomingMessage.messageType == MSG_TYPE_PASSWORD_UPDATE) {
+if (incomingMessage.messageType == MSG_TYPE_PASSWORD_UPDATE) {
     String incomingPass = String(incomingMessage.content);
 
     // always update web‐UI login password
     hashedOrganizerPassword = simpleHash(incomingPass);
     passwordChangeLocked    = true;
 
-    // only in Compatibility Mode re‐derive & rebroadcast mesh key
-    if (isUsingDefaultPsk && !wasAlreadySeen) {
+    // Immediately rebroadcast on **both** modes, but only Compat nodes re‐derive
+    if (!wasAlreadySeen) {
+      if (isUsingDefaultPsk) {
+        // Compatibility mode: derive new mesh key, then rebroadcast
         deriveAndSetSessionKey(incomingPass);
-        createAndSendMessage(incomingPass.c_str(),
-                             incomingPass.length(),
-                             MSG_TYPE_PASSWORD_UPDATE);
-    } else {
+      }
+      // Secure mode: skip derive but still rebroadcast
+      createAndSendMessage(incomingPass.c_str(),
+                           incomingPass.length(),
+                           MSG_TYPE_PASSWORD_UPDATE);
+        } else {
         // --- END VULNERABILITY PATCH ---
         
             // This message type is only processed by devices in Compatibility Mode (isUsingDefaultPsk = true)
