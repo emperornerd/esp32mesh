@@ -14,6 +14,7 @@
 #include <Preferences.h>
 #include "mbedtls/sha256.h"
 #include "mbedtls/aes.h"
+#include "mbedtls/md.h" // Added for HMAC
 
 
 #define USE_DISPLAY true
@@ -42,6 +43,11 @@ const unsigned long AP_INACTIVITY_TIMEOUT_SEC = 600; // 10 minutes to drop inact
 #define MAX_MESSAGE_CONTENT_LEN 224
 #define MAX_TTL_HOPS 40
 
+// --- NEW: HMAC and Payload Definitions ---
+#define HMAC_LEN 32 // Using HMAC-SHA256, which is 32 bytes
+// Payload length is the total content length MINUS the HMAC length. 224 - 32 = 192.
+#define MAX_PAYLOAD_LEN (MAX_MESSAGE_CONTENT_LEN - HMAC_LEN) 
+
 // Message types for processing and display
 #define MSG_TYPE_ORGANIZER 0
 #define MSG_TYPE_PUBLIC 1
@@ -64,8 +70,8 @@ typedef struct __attribute__((packed)) {
   uint8_t originalSenderMac[6];
   uint8_t ttl;
   uint8_t messageType;
-  uint16_t checksum;
-  char content[MAX_MESSAGE_CONTENT_LEN];
+  uint16_t checksum; // No longer used for authentication, replaced by HMAC in content[]
+  char content[MAX_MESSAGE_CONTENT_LEN]; // Buffer now holds [HMAC(32) | Payload(192)]
 } esp_now_message_t;
 
 // This initial password is used once at setup to generate the initial hash for the web UI.
@@ -227,12 +233,42 @@ void deriveAndSetSessionKey(const String& password) {
     if(VERBOSE_MODE) Serial.println("Volatile session key derived from password.");
 }
 
+// This function is still used for *internal* display logs, not for network message security.
 uint16_t calculateChecksum(const char* data, size_t len) {
     uint16_t sum = 0;
     for (size_t i = 0; i < len; ++i) {
         sum += (uint8_t)data[i];
     }
     return sum;
+}
+
+// --- NEW: Secure HMAC Generation Function ---
+/**
+ * @brief Generates an HMAC-SHA256 for message authentication.
+ * * @param msg The message struct (used for headers like ID, MAC, type).
+ * @param plaintext_payload The actual user data payload (as a null-terminated string).
+ * @param key The 16-byte secret key (sessionKey or PRE_SHARED_KEY).
+ * @param hmac_output A 32-byte buffer to store the resulting HMAC.
+ */
+void generateHMAC(const esp_now_message_t& msg, const char* plaintext_payload, const uint8_t* key, uint8_t* hmac_output) {
+    mbedtls_md_context_t ctx;
+    const mbedtls_md_info_t* md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    
+    mbedtls_md_init(&ctx);
+    mbedtls_md_setup(&ctx, md_info, 1); // 1 = hmac
+    mbedtls_md_hmac_starts(&ctx, key, 16); // 16-byte key
+    
+    // Hash the non-content, immutable fields
+    mbedtls_md_hmac_update(&ctx, (const unsigned char*)&msg.messageID, sizeof(msg.messageID));
+    mbedtls_md_hmac_update(&ctx, (const unsigned char*)msg.originalSenderMac, sizeof(msg.originalSenderMac));
+    mbedtls_md_hmac_update(&ctx, (const unsigned char*)&msg.messageType, sizeof(msg.messageType));
+    
+    // Hash the actual plaintext payload
+    size_t payload_len = strlen(plaintext_payload);
+    mbedtls_md_hmac_update(&ctx, (const unsigned char*)plaintext_payload, payload_len);
+    
+    mbedtls_md_hmac_finish(&ctx, hmac_output);
+    mbedtls_md_free(&ctx);
 }
 
 struct SeenMessage {
@@ -271,14 +307,15 @@ const size_t NVS_QUEUE_SIZE = 5;
 
 // Struct for messages held for local display
 struct LocalDisplayEntry {
-    esp_now_message_t message; // Stored in decrypted form
+    esp_now_message_t message; // Stored in decrypted form (payload only)
     unsigned long timestamp;
 };
 std::vector<LocalDisplayEntry> localDisplayLog;
 portMUX_TYPE localDisplayLogMutex = portMUX_INITIALIZER_UNLOCKED;
 const size_t MAX_LOCAL_DISPLAY_LOG_SIZE = 50;
 const size_t NUM_ORGANIZER_MESSAGES_TO_RETAIN = 5;
-const size_t MAX_WEB_MESSAGE_INPUT_LENGTH = 214;
+// MAX_WEB_MESSAGE_INPUT_LENGTH: 192 (MAX_PAYLOAD_LEN) - 8 (for "Urgent: " prefix) = 184
+const size_t MAX_WEB_MESSAGE_INPUT_LENGTH = 184;
 const size_t MAX_POST_BODY_LENGTH = 2048;
 
 // Map to store MACs of all peers for display and management
@@ -351,8 +388,10 @@ void addDisplayLog(const String& message) {
     memset(&dummyMsg, 0, sizeof(dummyMsg));
     dummyMsg.messageType = MSG_TYPE_UNKNOWN;
     memcpy(dummyMsg.originalSenderMac, ourMacBytes, 6);
-    message.toCharArray(dummyMsg.content, MAX_MESSAGE_CONTENT_LEN);
-    dummyMsg.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0';
+    // Use MAX_PAYLOAD_LEN for internal logs, as content[] now holds payload
+    message.toCharArray(dummyMsg.content, MAX_PAYLOAD_LEN);
+    dummyMsg.content[MAX_PAYLOAD_LEN - 1] = '\0';
+    // This checksum is for the internal-only log entry, not network auth
     dummyMsg.checksum = calculateChecksum(dummyMsg.content, strlen(dummyMsg.content));
     LocalDisplayEntry newEntry = {dummyMsg, millis()};
     localDisplayLog.push_back(newEntry);
@@ -451,20 +490,48 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
       keyToUse = sessionKey;
   }
   aesCtrDecrypt((uint8_t*)qMsg.messageData.content, MAX_MESSAGE_CONTENT_LEN, qMsg.messageData.messageID, qMsg.messageData.originalSenderMac, keyToUse);
-  qMsg.messageData.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0';
+  qMsg.messageData.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0'; // Ensure null termination for safety
 
-  // Calculate checksum on the decrypted content
-  uint16_t calculatedChecksum = calculateChecksum(qMsg.messageData.content, strlen(qMsg.messageData.content));
+  // --- START: HMAC Authentication ---
+  // The decrypted content is now [HMAC(32) | Payload(192)]
 
-  if (calculatedChecksum != qMsg.messageData.checksum) {
-      // Checksum mismatch, queue for logging in main loop.
+  // 1. Extract received HMAC
+  uint8_t received_hmac[HMAC_LEN];
+  memcpy(received_hmac, qMsg.messageData.content, HMAC_LEN);
+  
+  // 2. Extract received payload
+  char received_payload[MAX_PAYLOAD_LEN];
+  memcpy(received_payload, qMsg.messageData.content + HMAC_LEN, MAX_PAYLOAD_LEN);
+  received_payload[MAX_PAYLOAD_LEN - 1] = '\0';
+  
+  // 3. Calculate expected HMAC
+  uint8_t expected_hmac[HMAC_LEN];
+  // Note: We pass the *original* message struct (qMsg.messageData) to generateHMAC,
+  // as it uses fields like messageID, mac, and type. But we pass the *extracted* payload.
+  generateHMAC(qMsg.messageData, received_payload, keyToUse, expected_hmac);
+
+  // 4. Compare HMACs in constant time
+  int diff = 0;
+  for (int i = 0; i < HMAC_LEN; i++) {
+      diff |= received_hmac[i] ^ expected_hmac[i];
+  }
+
+  if (diff != 0) {
+      // HMAC mismatch, queue for logging in main loop.
       NvsQueueItem nvsItem;
       memcpy(nvsItem.senderMac, recvInfo->src_addr, 6);
       nvsItem.messageID = qMsg.messageData.messageID;
-      nvsItem.type = 0; // 0 for hash failure
+      nvsItem.type = 0; // 0 for hash/HMAC failure
       xQueueSendFromISR(nvsQueue, &nvsItem, 0);
       return; // Drop the message
   }
+
+  // 5. Authentication successful. Overwrite the content buffer with *only* the payload
+  //    so the rest of the code works as expected.
+  memset(qMsg.messageData.content, 0, MAX_MESSAGE_CONTENT_LEN);
+  memcpy(qMsg.messageData.content, received_payload, strlen(received_payload) + 1); // +1 for null term
+  
+  // --- END: HMAC Authentication ---
 
   if (qMsg.messageData.ttl == 0) {
       return;
@@ -518,18 +585,34 @@ void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len,
   newMessage.ttl = MAX_TTL_HOPS;
   newMessage.messageType = type;
 
-  size_t len_to_copy = std::min(plaintext_data_len, (size_t)MAX_MESSAGE_CONTENT_LEN - 1);
-  strncpy(newMessage.content, plaintext_data, len_to_copy);
-  newMessage.content[len_to_copy] = '\0';
+  // Copy plaintext to a temporary buffer, respecting new payload length
+  size_t len_to_copy = std::min(plaintext_data_len, (size_t)MAX_PAYLOAD_LEN - 1);
+  char plaintext_payload[MAX_PAYLOAD_LEN];
+  strncpy(plaintext_payload, plaintext_data, len_to_copy);
+  plaintext_payload[len_to_copy] = '\0';
 
-  // Calculate checksum on plaintext content BEFORE encryption
-  newMessage.checksum = calculateChecksum(newMessage.content, strlen(newMessage.content));
 
-  // Encrypt with the appropriate key based on message type
+  // Determine the key to use for HMAC and Encryption
   const uint8_t* keyToUse = PRE_SHARED_KEY; // Default to factory key
   if (useSessionKey && type != MSG_TYPE_PASSWORD_UPDATE) {
       keyToUse = sessionKey;
   }
+
+  // --- NEW: Generate HMAC and construct content buffer ---
+  // 1. Generate HMAC based on plaintext payload and message headers
+  uint8_t hmac_output[HMAC_LEN];
+  generateHMAC(newMessage, plaintext_payload, keyToUse, hmac_output);
+  
+  // 2. Construct the final content: [HMAC(32) | Payload(192)]
+  memset(newMessage.content, 0, MAX_MESSAGE_CONTENT_LEN);
+  memcpy(newMessage.content, hmac_output, HMAC_LEN);
+  memcpy(newMessage.content + HMAC_LEN, plaintext_payload, strlen(plaintext_payload) + 1); // +1 for null
+  
+  // 3. Set old checksum to 0, it's not used for authentication
+  newMessage.checksum = 0;
+  // --- END: HMAC Logic ---
+
+  // Encrypt the entire content buffer [HMAC | Payload]
   aesCtrEncrypt((uint8_t*)newMessage.content, MAX_MESSAGE_CONTENT_LEN, newMessage.messageID, newMessage.originalSenderMac, keyToUse);
 
   if (targetMac != nullptr) {
@@ -553,12 +636,21 @@ void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len,
   portENTER_CRITICAL(&localDisplayLogMutex);
   esp_now_message_t displayMessage = newMessage;
   aesCtrDecrypt((uint8_t*)displayMessage.content, MAX_MESSAGE_CONTENT_LEN, displayMessage.messageID, displayMessage.originalSenderMac, keyToUse);
-  displayMessage.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0';
+  
+  // Extract payload from [HMAC | payload] for local display
+  char payload_only[MAX_PAYLOAD_LEN];
+  memcpy(payload_only, displayMessage.content + HMAC_LEN, MAX_PAYLOAD_LEN);
+  payload_only[MAX_PAYLOAD_LEN - 1] = '\0';
+  
+  // Overwrite the content with just the payload for the display log
+  memset(displayMessage.content, 0, MAX_MESSAGE_CONTENT_LEN);
+  strncpy(displayMessage.content, payload_only, MAX_PAYLOAD_LEN - 1);
+  
   LocalDisplayEntry newEntry = {displayMessage, millis()};
   localDisplayLog.push_back(newEntry);
   portEXIT_CRITICAL(&localDisplayLogMutex);
 
-  if(VERBOSE_MODE) Serial.println("Sending (Plaintext): " + String(plaintext_data));
+  if(VERBOSE_MODE) Serial.println("Sending (Plaintext): " + String(plaintext_payload));
 }
 
 void manageLocalDisplayLog() {
@@ -741,7 +833,7 @@ void setup() {
 
   esp_now_register_recv_cb(onDataRecv);
 
-  char msgContentBuf[MAX_MESSAGE_CONTENT_LEN];
+  char msgContentBuf[MAX_PAYLOAD_LEN];
   snprintf(msgContentBuf, sizeof(msgContentBuf), "Node %s initializing", MAC_suffix_str.c_str());
   createAndSendMessage(msgContentBuf, strlen(msgContentBuf), MSG_TYPE_AUTO_INIT);
 
@@ -781,7 +873,7 @@ void loop() {
   // --- Process Security Event Queue for NVS Logging ---
   NvsQueueItem nvsItem;
   while (xQueueReceive(nvsQueue, &nvsItem, 0) == pdPASS) {
-      if (nvsItem.type == 0) { // Hash failure
+      if (nvsItem.type == 0) { // Hash/HMAC failure
           hashFailureCount++;
           securityCountersDirty = true;
           uint8_t failLogIndex = preferences.getUChar("failLogIdx", 0);
@@ -790,7 +882,7 @@ void loop() {
           preferences.putString(key.c_str(), logData);
           failLogIndex = (failLogIndex + 1) % MAX_FAIL_LOG_ENTRIES;
           preferences.putUChar("failLogIdx", failLogIndex);
-          if(VERBOSE_MODE) Serial.printf("Logged hash failure from %s. Total failures: %u\n", formatMac(nvsItem.senderMac).c_str(), hashFailureCount);
+          if(VERBOSE_MODE) Serial.printf("Logged hash/HMAC failure from %s. Total failures: %u\n", formatMac(nvsItem.senderMac).c_str(), hashFailureCount);
       }
   }
 
@@ -811,7 +903,8 @@ void loop() {
     esp_now_message_t incomingMessage = qMsg.messageData;
     uint8_t* recvInfoSrcAddr = qMsg.senderMac;
     unsigned long receptionTimestamp = qMsg.timestamp;
-    String incomingContent = String(incomingMessage.content);
+    // Note: incomingMessage.content is now *only* the payload, auth was handled in onDataRecv
+    String incomingContent = String(incomingMessage.content); 
     String originalSenderMacSuffix = getMacSuffix(incomingMessage.originalSenderMac);
 
     portENTER_CRITICAL(&lastSeenPeersMutex);
@@ -845,8 +938,21 @@ void loop() {
             lastJammingTimestampPersisted = millis();
             securityCountersDirty = true;
         }
+        // Need to re-create the [HMAC | payload] structure for caching
         esp_now_message_t encryptedForCache = incomingMessage;
         const uint8_t* keyToUse = useSessionKey ? sessionKey : PRE_SHARED_KEY;
+        
+        char payload_for_hmac[MAX_PAYLOAD_LEN];
+        strncpy(payload_for_hmac, incomingMessage.content, MAX_PAYLOAD_LEN - 1);
+        payload_for_hmac[MAX_PAYLOAD_LEN - 1] = '\0';
+        
+        uint8_t hmac_output[HMAC_LEN];
+        generateHMAC(encryptedForCache, payload_for_hmac, keyToUse, hmac_output);
+        
+        memset(encryptedForCache.content, 0, MAX_MESSAGE_CONTENT_LEN);
+        memcpy(encryptedForCache.content, hmac_output, HMAC_LEN);
+        memcpy(encryptedForCache.content + HMAC_LEN, payload_for_hmac, strlen(payload_for_hmac) + 1);
+
         aesCtrEncrypt((uint8_t*)encryptedForCache.content, MAX_MESSAGE_CONTENT_LEN, encryptedForCache.messageID, encryptedForCache.originalSenderMac, keyToUse);
         addOrUpdateMessageToSeen(encryptedForCache.messageID, encryptedForCache.originalSenderMac, encryptedForCache);
         continue;
@@ -954,11 +1060,27 @@ void loop() {
     }
     
     // For every message that isn't a discovery/status message, prepare it for caching and potential rebroadcast
-    esp_now_message_t encryptedForCache = incomingMessage; // incomingMessage is plaintext
+    // We must re-create the [HMAC | payload] structure and re-encrypt it for the cache
+    esp_now_message_t encryptedForCache = incomingMessage; // incomingMessage has plaintext *payload only*
     const uint8_t* keyToUseForCache = PRE_SHARED_KEY; // Default to PSK
     if(useSessionKey && encryptedForCache.messageType != MSG_TYPE_PASSWORD_UPDATE) {
         keyToUseForCache = sessionKey; // Use session key for normal traffic
     }
+    
+    // Re-create payload for HMAC
+    char payload_for_hmac[MAX_PAYLOAD_LEN];
+    strncpy(payload_for_hmac, incomingMessage.content, MAX_PAYLOAD_LEN - 1);
+    payload_for_hmac[MAX_PAYLOAD_LEN - 1] = '\0';
+    
+    // Generate HMAC
+    uint8_t hmac_output[HMAC_LEN];
+    generateHMAC(encryptedForCache, payload_for_hmac, keyToUseForCache, hmac_output);
+    
+    // Construct the [HMAC | payload] buffer
+    memset(encryptedForCache.content, 0, MAX_MESSAGE_CONTENT_LEN);
+    memcpy(encryptedForCache.content, hmac_output, HMAC_LEN);
+    memcpy(encryptedForCache.content + HMAC_LEN, payload_for_hmac, strlen(payload_for_hmac) + 1);
+
     // Encrypt the message content before caching
     aesCtrEncrypt((uint8_t*)encryptedForCache.content, MAX_MESSAGE_CONTENT_LEN, encryptedForCache.messageID, encryptedForCache.originalSenderMac, keyToUseForCache);
     addOrUpdateMessageToSeen(encryptedForCache.messageID, encryptedForCache.originalSenderMac, encryptedForCache);
@@ -970,6 +1092,7 @@ void loop() {
         }
         if (!skipDisplayLog) {
             portENTER_CRITICAL(&localDisplayLogMutex);
+            // incomingMessage already contains *only* the payload
             LocalDisplayEntry newEntry = {incomingMessage, millis()};
             localDisplayLog.push_back(newEntry);
             portEXIT_CRITICAL(&localDisplayLogMutex);
@@ -1027,7 +1150,7 @@ void loop() {
       }
       if (millis() - lastJammingAlertSent > JAMMING_ALERT_COOLDOWN_MS) {
           if(VERBOSE_MODE) Serial.println("Sending jamming alert to the mesh.");
-          char alertContent[32];
+          char alertContent[MAX_PAYLOAD_LEN];
           snprintf(alertContent, sizeof(alertContent), "Jamming Alert from %s", MAC_suffix_str.c_str());
           createAndSendMessage(alertContent, strlen(alertContent), MSG_TYPE_JAMMING_ALERT);
           lastJammingAlertSent = millis();
@@ -1323,7 +1446,7 @@ void loop() {
                       else {
                           uint8_t messageType = MSG_TYPE_ORGANIZER;
                           if (urgentParam == "on") decodedMessage = "Urgent: " + decodedMessage;
-                          if (decodedMessage.length() >= MAX_MESSAGE_CONTENT_LEN) decodedMessage = decodedMessage.substring(0, MAX_MESSAGE_CONTENT_LEN - 1);
+                          if (decodedMessage.length() >= MAX_PAYLOAD_LEN) decodedMessage = decodedMessage.substring(0, MAX_PAYLOAD_LEN - 1);
                           createAndSendMessage(decodedMessage.c_str(), decodedMessage.length(), messageType);
                           if (webFeedbackMessage.length() == 0) webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer message queued!</p>";
                       }
@@ -1332,7 +1455,7 @@ void loop() {
                   if (publicMessagingEnabled && passwordChangeLocked) {
                       if (decodedMessage.length() == 0) { webFeedbackMessage = "<p class='feedback' style='color:orange;'>Please enter a message.</p>"; }
                       else {
-                          if (decodedMessage.length() >= MAX_MESSAGE_CONTENT_LEN) decodedMessage = decodedMessage.substring(0, MAX_MESSAGE_CONTENT_LEN - 1);
+                          if (decodedMessage.length() >= MAX_PAYLOAD_LEN) decodedMessage = decodedMessage.substring(0, MAX_PAYLOAD_LEN - 1);
                           createAndSendMessage(decodedMessage.c_str(), decodedMessage.length(), MSG_TYPE_PUBLIC);
                           if (webFeedbackMessage.length() == 0) webFeedbackMessage = "<p class='feedback' style='color:green;'>Public message queued!</p>";
                       }
@@ -1553,9 +1676,9 @@ void loop() {
                                   lastJammingTimestampPersisted == 0 ? "N/A" : timeAgo, lastJammingDurationPersisted);
                 }
 
-                client.printf("<h3 style='text-align:left;'>Checksum Failures (since first boot): %u</h3>", hashFailureCount);
+                client.printf("<h3 style='text-align:left;'>Checksum/HMAC Failures (since first boot): %u</h3>", hashFailureCount);
                 if (hashFailureCount > 0) {
-                    client.println(F("<h4>Recent Checksum Failure Log:</h4><ul style='font-size:0.8em; padding-left: 20px;'>"));
+                    client.println(F("<h4>Recent Failure Log:</h4><ul style='font-size:0.8em; padding-left: 20px;'>"));
                     for (int i = 0; i < MAX_FAIL_LOG_ENTRIES; i++) {
                         String key = "failMsg" + String(i); String logEntry = preferences.getString(key.c_str(), "");
                         if (logEntry.length() > 0) { client.print(F("<li>")); client.print(escapeHtml(logEntry)); client.println(F("</li>")); }
@@ -1784,7 +1907,7 @@ void displayStatsInfoMode() {
       tft.printf("    Last: %lu s ago\n", (millis() - lastJammingTimestampPersisted) / 1000);
       tft.printf("    Dur: %lu ms\n", lastJammingDurationPersisted);
   }
-  tft.printf("  Checksum Failures: %u\n", hashFailureCount);
+  tft.printf("  HMAC Failures: %u\n", hashFailureCount);
   tft.printf("  Infiltration Attempts: %u\n", infiltrationIncidentCount);
   if(infiltrationIncidentCount > 0 && lastInfiltrationTimestampPersisted > 0) {
       tft.printf("    Last: %lu s ago\n", (millis() - lastInfiltrationTimestampPersisted) / 1000);
