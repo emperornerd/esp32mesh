@@ -1005,13 +1005,19 @@ void loop() {
     }
 
     if (incomingMessage.messageType == MSG_TYPE_PASSWORD_UPDATE) {
-        // --- START VULNERABILITY PATCH ---
-        // A device in "Secure Mode" (flashed with a secure PSK) MUST NEVER
-        // accept an over-the-air password update. It already has the final key.
-        if (!isUsingDefaultPsk) {
-            if(VERBOSE_MODE) Serial.println("Ignoring MSG_TYPE_PASSWORD_UPDATE: Node is in Secure Mode.");
-            skipDisplayLog = true; 
-        } else {
+    String incomingPass = String(incomingMessage.content);
+
+    // always update web‐UI login password
+    hashedOrganizerPassword = simpleHash(incomingPass);
+    passwordChangeLocked    = true;
+
+    // only in Compatibility Mode re‐derive & rebroadcast mesh key
+    if (isUsingDefaultPsk && !wasAlreadySeen) {
+        deriveAndSetSessionKey(incomingPass);
+        createAndSendMessage(incomingPass.c_str(),
+                             incomingPass.length(),
+                             MSG_TYPE_PASSWORD_UPDATE);
+    } else {
         // --- END VULNERABILITY PATCH ---
         
             // This message type is only processed by devices in Compatibility Mode (isUsingDefaultPsk = true)
@@ -1961,4 +1967,3 @@ void displayStatsInfoMode() {
   }
 }
 #endif
-
