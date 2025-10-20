@@ -1002,75 +1002,84 @@ void loop() {
         }
         continue;
     }
-if (incomingMessage.messageType == MSG_TYPE_PASSWORD_UPDATE) {
-    String incomingPass = String(incomingMessage.content);
-
-    // always update web UI login password
-    hashedOrganizerPassword = simpleHash(incomingPass);
-    passwordChangeLocked    = true;
-
-    // Immediately rebroadcast on **both** modes, but only Compat nodes re-derive
-    if (!wasAlreadySeen) {
-      if (isUsingDefaultPsk) {
-        // Compatibility mode: derive new mesh key, then rebroadcast
-        deriveAndSetSessionKey(incomingPass);
-      }
-      // Secure mode: skip derive but still rebroadcast
-      createAndSendMessage(incomingPass.c_str(),
-                           incomingPass.length(),
-                           MSG_TYPE_PASSWORD_UPDATE);
-    }
-        
-    // Infiltration Detection Logic (runs for all password updates)    
-    // --- START: Infiltration Detection Logic (runs for all password updates) ---
-    String newPasswordHash = simpleHash(String(incomingMessage.content));
-    unsigned long currentTime = millis();
-
-    portENTER_CRITICAL(&passwordUpdateHistoryMutex);
-    // 1. Prune old entries from history
-    passwordUpdateHistory.erase(std::remove_if(passwordUpdateHistory.begin(), passwordUpdateHistory.end(),
-        [currentTime](const PasswordUpdateEvent& event) {
-            return (currentTime - event.timestamp) > INFILTRATION_WINDOW_MS;
-        }), passwordUpdateHistory.end());
-
-    // 2. Add the new event
-    PasswordUpdateEvent newEvent;
-    newEvent.timestamp = currentTime;
-    newEvent.passwordHash = newPasswordHash;
-    memcpy(newEvent.senderMac, incomingMessage.originalSenderMac, 6);
-    passwordUpdateHistory.push_back(newEvent);
-
-    // 3. Check for conflicting passwords
-    std::set<String> uniqueHashesInWindow;
-    for (const auto& event : passwordUpdateHistory) {
-        uniqueHashesInWindow.insert(event.passwordHash);
-    }
-    portEXIT_CRITICAL(&passwordUpdateHistoryMutex);
-
-    if (uniqueHashesInWindow.size() > INFILTRATION_THRESHOLD) {
-        if (!isInfiltrationAlert) {
-            if(VERBOSE_MODE) Serial.println("INFILTRATION ATTEMPT DETECTED: Multiple conflicting passwords received in a short period.");
-            isInfiltrationAlert = true;
-            lastInfiltrationEventTimestamp = millis();
-            infiltrationIncidentCount++;
-            lastInfiltrationTimestampPersisted = millis();
-            securityCountersDirty = true;
-
-            // Log the MAC of the sender that triggered the alert
-            uint8_t infilLogIndex = preferences.getUChar("infilLogIdx", 0);
-            String logData = formatMac(incomingMessage.originalSenderMac);
-            String key = "infilMsg" + String(infilLogIndex);
-            preferences.putString(key.c_str(), logData);
-            infilLogIndex = (infilLogIndex + 1) % MAX_INFIL_LOG_ENTRIES;
-            preferences.putUChar("infilLogIdx", infilLogIndex);
-            if (VERBOSE_MODE) Serial.printf("Logged infiltration attempt from %s. Total attempts: %u\n", formatMac(incomingMessage.originalSenderMac).c_str(), infiltrationIncidentCount);
-
-            addDisplayLog("Infiltration Alert!");
-        }
-    }
     
-    skipDisplayLog = true;
+    // --- START: MODIFIED/FIXED PASSWORD_UPDATE BLOCK ---
+    if (incomingMessage.messageType == MSG_TYPE_PASSWORD_UPDATE) {
+        String incomingPass = String(incomingMessage.content);
+
+        // This core logic should only run the *first* time we see this password update
+        if (!wasAlreadySeen) {
+            // always update web UI login password
+            hashedOrganizerPassword = simpleHash(incomingPass);
+            passwordChangeLocked    = true;
+
+            // Compatibility mode nodes need to derive the new key.
+            if (isUsingDefaultPsk) {
+                if(VERBOSE_MODE) Serial.println("Received new password in Compat mode. Deriving new session key.");
+                deriveAndSetSessionKey(incomingPass);
+            } else {
+                if(VERBOSE_MODE) Serial.println("Received new password in Secure mode. Updating web UI hash only.");
+            }
+        }
+            
+        // Infiltration Detection Logic (runs for all password updates)    
+        // --- START: Infiltration Detection Logic (runs for all password updates) ---
+        String newPasswordHash = simpleHash(String(incomingMessage.content));
+        unsigned long currentTime = millis();
+
+        portENTER_CRITICAL(&passwordUpdateHistoryMutex);
+        // 1. Prune old entries from history
+        passwordUpdateHistory.erase(std::remove_if(passwordUpdateHistory.begin(), passwordUpdateHistory.end(),
+            [currentTime](const PasswordUpdateEvent& event) {
+                return (currentTime - event.timestamp) > INFILTRATION_WINDOW_MS;
+            }), passwordUpdateHistory.end());
+
+        // 2. Add the new event
+        PasswordUpdateEvent newEvent;
+        newEvent.timestamp = currentTime;
+        newEvent.passwordHash = newPasswordHash;
+        memcpy(newEvent.senderMac, incomingMessage.originalSenderMac, 6);
+        passwordUpdateHistory.push_back(newEvent);
+
+        // 3. Check for conflicting passwords
+        std::set<String> uniqueHashesInWindow;
+        for (const auto& event : passwordUpdateHistory) {
+            uniqueHashesInWindow.insert(event.passwordHash);
+        }
+        portEXIT_CRITICAL(&passwordUpdateHistoryMutex);
+
+        if (uniqueHashesInWindow.size() > INFILTRATION_THRESHOLD) {
+            if (!isInfiltrationAlert) {
+                if(VERBOSE_MODE) Serial.println("INFILTRATION ATTEMPT DETECTED: Multiple conflicting passwords received in a short period.");
+                isInfiltrationAlert = true;
+                lastInfiltrationEventTimestamp = millis();
+                infiltrationIncidentCount++;
+                lastInfiltrationTimestampPersisted = millis();
+                securityCountersDirty = true;
+
+                // Log the MAC of the sender that triggered the alert
+                uint8_t infilLogIndex = preferences.getUChar("infilLogIdx", 0);
+                String logData = formatMac(incomingMessage.originalSenderMac);
+                String key = "infilMsg" + String(infilLogIndex);
+                preferences.putString(key.c_str(), logData);
+                infilLogIndex = (infilLogIndex + 1) % MAX_INFIL_LOG_ENTRIES;
+                preferences.putUChar("infilLogIdx", infilLogIndex);
+                if (VERBOSE_MODE) Serial.printf("Logged infiltration attempt from %s. Total attempts: %u\n", formatMac(incomingMessage.originalSenderMac).c_str(), infiltrationIncidentCount);
+
+                addDisplayLog("Infiltration Alert!");
+            }
+        }
+        
+        skipDisplayLog = true;
+
+        // --- FIX ---
+        // We DO NOT call createAndSendMessage() here. This was causing a broadcast storm
+        // by re-originating the password update message on every node.
+        // We now fall-through to the generic message handler below, which will
+        // correctly add the message to the cache and forward it (not re-originate)
+        // if it was not seen.
     }
+    // --- END: MODIFIED/FIXED PASSWORD_UPDATE BLOCK ---
     
     // For every message that isn't a discovery/status message, prepare it for caching and potential rebroadcast
     // We must re-create the [HMAC | payload] structure and re-encrypt it for the cache
