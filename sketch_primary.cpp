@@ -170,7 +170,7 @@ DNSServer dnsServer;
 const uint8_t PRE_SHARED_KEY[] = {
   0xDE, 0xAD, 0xBE, 0xEF, // 4-byte Magic prefix for the flasher
   0x7C, 0xE3, 0x91, 0x2F, 0xA8, 0x5D, 0xB4, 0x69, // 16-byte Default PSK
-  0x3E, 0xC7, 0x14, 0xF2, 0x86, 0x0B, 0xD9, 0x4A
+  0x3E, 0xC7, 0x14, 0xF2, 0x86, 0x0B, 0xD9, 0x3A
 };
 // --- END FLASHER FIX ---
 
@@ -580,8 +580,8 @@ void sendToAllPeers(esp_now_message_t& message) {
 
 void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len, uint8_t type, const uint8_t* targetMac = nullptr) {
   // Node can send Organizer/Public messages only if a non-default password has been set.
-  if ((type == MSG_TYPE_ORGANIZER || type == MSG_TYPE_PUBLIC) && !passwordChangeLocked) {
-    if(VERBOSE_MODE) Serial.println("Node not capable of sending this message type (password not set). Skipping send.");
+ if ((type == MSG_TYPE_ORGANIZER || type == MSG_TYPE_PUBLIC) && !useSessionKey) {
+        if(VERBOSE_MODE) Serial.println("Node not capable of sending this message type (password not set). Skipping send.");
     webFeedbackMessage = "<p class='feedback' style='color:red;'>Error: Node not configured to send this message. Set an organizer password first.</p>";
     return;
   }
@@ -778,8 +778,7 @@ void setup() {
     // need to log in with "password" and then set a new HUMAN-READABLE password
     // for future UI logins. This new password will NOT change the mesh key.
     hashedOrganizerPassword = simpleHash(WEB_PASSWORD);
-  }
-  // --- END MODIFIED LOGIC ---
+  }  // --- END MODIFIED LOGIC ---
 
   WiFi.mode(WIFI_AP_STA);
   WiFi.setSleep(false);
@@ -1003,15 +1002,14 @@ void loop() {
         }
         continue;
     }
-
 if (incomingMessage.messageType == MSG_TYPE_PASSWORD_UPDATE) {
     String incomingPass = String(incomingMessage.content);
 
-    // always update web‐UI login password
+    // always update web UI login password
     hashedOrganizerPassword = simpleHash(incomingPass);
     passwordChangeLocked    = true;
 
-    // Immediately rebroadcast on **both** modes, but only Compat nodes re‐derive
+    // Immediately rebroadcast on **both** modes, but only Compat nodes re-derive
     if (!wasAlreadySeen) {
       if (isUsingDefaultPsk) {
         // Compatibility mode: derive new mesh key, then rebroadcast
@@ -1021,75 +1019,57 @@ if (incomingMessage.messageType == MSG_TYPE_PASSWORD_UPDATE) {
       createAndSendMessage(incomingPass.c_str(),
                            incomingPass.length(),
                            MSG_TYPE_PASSWORD_UPDATE);
-        } else {
-        // --- END VULNERABILITY PATCH ---
+    }
         
-            // This message type is only processed by devices in Compatibility Mode (isUsingDefaultPsk = true)
-            
-            // --- START: Infiltration Detection Logic ---
-            String newPasswordHash = simpleHash(String(incomingMessage.content));
-            unsigned long currentTime = millis();
+    // Infiltration Detection Logic (runs for all password updates)    
+    // --- START: Infiltration Detection Logic (runs for all password updates) ---
+    String newPasswordHash = simpleHash(String(incomingMessage.content));
+    unsigned long currentTime = millis();
+
+    portENTER_CRITICAL(&passwordUpdateHistoryMutex);
+    // 1. Prune old entries from history
+    passwordUpdateHistory.erase(std::remove_if(passwordUpdateHistory.begin(), passwordUpdateHistory.end(),
+        [currentTime](const PasswordUpdateEvent& event) {
+            return (currentTime - event.timestamp) > INFILTRATION_WINDOW_MS;
+        }), passwordUpdateHistory.end());
+
+    // 2. Add the new event
+    PasswordUpdateEvent newEvent;
+    newEvent.timestamp = currentTime;
+    newEvent.passwordHash = newPasswordHash;
+    memcpy(newEvent.senderMac, incomingMessage.originalSenderMac, 6);
+    passwordUpdateHistory.push_back(newEvent);
+
+    // 3. Check for conflicting passwords
+    std::set<String> uniqueHashesInWindow;
+    for (const auto& event : passwordUpdateHistory) {
+        uniqueHashesInWindow.insert(event.passwordHash);
+    }
+    portEXIT_CRITICAL(&passwordUpdateHistoryMutex);
+
+    if (uniqueHashesInWindow.size() > INFILTRATION_THRESHOLD) {
+        if (!isInfiltrationAlert) {
+            if(VERBOSE_MODE) Serial.println("INFILTRATION ATTEMPT DETECTED: Multiple conflicting passwords received in a short period.");
+            isInfiltrationAlert = true;
+            lastInfiltrationEventTimestamp = millis();
+            infiltrationIncidentCount++;
+            lastInfiltrationTimestampPersisted = millis();
+            securityCountersDirty = true;
+
+            // Log the MAC of the sender that triggered the alert
+            uint8_t infilLogIndex = preferences.getUChar("infilLogIdx", 0);
+            String logData = formatMac(incomingMessage.originalSenderMac);
+            String key = "infilMsg" + String(infilLogIndex);
+            preferences.putString(key.c_str(), logData);
+            infilLogIndex = (infilLogIndex + 1) % MAX_INFIL_LOG_ENTRIES;
+            preferences.putUChar("infilLogIdx", infilLogIndex);
+            if (VERBOSE_MODE) Serial.printf("Logged infiltration attempt from %s. Total attempts: %u\n", formatMac(incomingMessage.originalSenderMac).c_str(), infiltrationIncidentCount);
+
+            addDisplayLog("Infiltration Alert!");
+        }
+    }
     
-            portENTER_CRITICAL(&passwordUpdateHistoryMutex);
-            // 1. Prune old entries from history
-            passwordUpdateHistory.erase(std::remove_if(passwordUpdateHistory.begin(), passwordUpdateHistory.end(),
-                [currentTime](const PasswordUpdateEvent& event) {
-                    return (currentTime - event.timestamp) > INFILTRATION_WINDOW_MS;
-                }), passwordUpdateHistory.end());
-    
-            // 2. Add the new event
-            PasswordUpdateEvent newEvent;
-            newEvent.timestamp = currentTime;
-            newEvent.passwordHash = newPasswordHash;
-            memcpy(newEvent.senderMac, incomingMessage.originalSenderMac, 6);
-            passwordUpdateHistory.push_back(newEvent);
-    
-            // 3. Check for conflicting passwords
-            std::set<String> uniqueHashesInWindow;
-            for (const auto& event : passwordUpdateHistory) {
-                uniqueHashesInWindow.insert(event.passwordHash);
-            }
-            portEXIT_CRITICAL(&passwordUpdateHistoryMutex);
-    
-            if (uniqueHashesInWindow.size() > INFILTRATION_THRESHOLD) {
-                if (!isInfiltrationAlert) {
-                    if(VERBOSE_MODE) Serial.println("INFILTRATION ATTEMPT DETECTED: Multiple conflicting passwords received in a short period.");
-                    isInfiltrationAlert = true;
-                    lastInfiltrationEventTimestamp = millis();
-                    infiltrationIncidentCount++;
-                    lastInfiltrationTimestampPersisted = millis();
-                    securityCountersDirty = true;
-    
-                    // Log the MAC of the sender that triggered the alert
-                    uint8_t infilLogIndex = preferences.getUChar("infilLogIdx", 0);
-                    String logData = formatMac(incomingMessage.originalSenderMac);
-                    String key = "infilMsg" + String(infilLogIndex);
-                    preferences.putString(key.c_str(), logData);
-                    infilLogIndex = (infilLogIndex + 1) % MAX_INFIL_LOG_ENTRIES;
-                    preferences.putUChar("infilLogIdx", infilLogIndex);
-                    if (VERBOSE_MODE) Serial.printf("Logged infiltration attempt from %s. Total attempts: %u\n", formatMac(incomingMessage.originalSenderMac).c_str(), infiltrationIncidentCount);
-    
-                    addDisplayLog("Infiltration Alert!");
-                }
-            }
-            // --- END: Infiltration Detection Logic ---
-    
-            // Block password changes if already set, but after logging infiltration attempt.
-            if (passwordChangeLocked) {
-                if(VERBOSE_MODE) Serial.println("Received password update but local password is locked. Ignoring update.");
-            } else { // Only change local key if not locked
-                if (!wasAlreadySeen) {
-                    if(VERBOSE_MODE) Serial.println("Received password update command via mesh.");
-                    deriveAndSetSessionKey(String(incomingMessage.content));
-                    if(VERBOSE_MODE) {
-                      Serial.println("Organizer password updated via mesh. Node is now capable of sending messages.");
-                      Serial.printf("Password updated via OTA. Requesting public status from sender %02X:%02X:%02X:%02X:%02X:%02X\n", incomingMessage.originalSenderMac[0], incomingMessage.originalSenderMac[1], incomingMessage.originalSenderMac[2], incomingMessage.originalSenderMac[3], incomingMessage.originalSenderMac[4], incomingMessage.originalSenderMac[5]);
-                    }
-                    createAndSendMessage("", 0, MSG_TYPE_STATUS_REQUEST, incomingMessage.originalSenderMac);
-                }
-            }
-            skipDisplayLog = true;
-        } // --- VULNERABILITY PATCH: Added closing brace ---
+    skipDisplayLog = true;
     }
     
     // For every message that isn't a discovery/status message, prepare it for caching and potential rebroadcast
@@ -1528,10 +1508,16 @@ if (incomingMessage.messageType == MSG_TYPE_PASSWORD_UPDATE) {
                               deriveAndSetSessionKey(decodedNewPassword);
                               createAndSendMessage(decodedNewPassword.c_str(), decodedNewPassword.length(), MSG_TYPE_PASSWORD_UPDATE);
                           } else {
-                              // Secure Flash Mode: Only update the web UI login password. Do NOT change the mesh key.
-                              if(VERBOSE_MODE) Serial.println("Setting password in Secure Mode. Updating web UI login hash only.");
-                              hashedOrganizerPassword = simpleHash(decodedNewPassword);
-                              passwordChangeLocked = true; // Lock from further changes.
+    // Secure Flash Mode: Only update the web UI login password. Do NOT change the mesh key.
+    if(VERBOSE_MODE) Serial.println("Setting password in Secure Mode. Updating web UI login hash only.");
+    hashedOrganizerPassword = simpleHash(decodedNewPassword);
+    passwordChangeLocked = true; // Lock from further changes.
+
+    // Broadcast the new organizer password so other secure nodes update their web-login too.
+    // MSG_TYPE_PASSWORD_UPDATE messages are encrypted with the flashed PSK (PRE_SHARED_KEY+4),
+    // so plaintext here is transported safely to other nodes sharing the same flashed key.
+    createAndSendMessage(decodedNewPassword.c_str(), decodedNewPassword.length(), MSG_TYPE_PASSWORD_UPDATE);
+
                           }
                           webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer password updated successfully!</p>";
                           loginAttempts = 0;
