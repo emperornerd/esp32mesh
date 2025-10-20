@@ -1,6 +1,7 @@
 #include <WiFi.h>
 #include <esp_now.h>
-#include <esp_wifi.h> // For esp_wifi_set_channel
+#include <esp_wifi.h> // For esp_wifi_set_channel, and promiscuous mode
+#include <esp_wifi_types.h> // For wifi_promiscuous_pkt_type_t
 #include <vector>
 #include <algorithm>
 #include <string.h>
@@ -128,6 +129,18 @@ const int MAX_FAIL_LOG_ENTRIES = 5;
 bool securityCountersDirty = false; // Flag to trigger batched NVS write
 const unsigned long NVS_WRITE_INTERVAL_MS = 60000; // 1 minute
 unsigned long lastNvsWrite = 0;
+
+// --- START: NEW Jamming Detection (RSSI-based) ---
+// This logic replaces the non-functional CBP (Clear Channel Assessment) logic
+bool isPromiscuousCheckActive = false;
+unsigned long promiscuousCheckStartTime = 0;
+const unsigned long PROMISCUOUS_SAMPLE_DURATION_MS = 2000; // Sample noise for 2 seconds
+volatile long totalRssi = 0;
+volatile int rssiSampleCount = 0;
+// A "noisy" channel is anything less negative than this. -65dBm is a good threshold.
+const int RSSI_JAMMING_THRESHOLD = -65; 
+// --- END: NEW Jamming Detection ---
+
 
 // --- Infiltration Detection & Security Logging Variables ---
 const unsigned long INFILTRATION_WINDOW_MS = 300000; // 5 minutes
@@ -486,6 +499,26 @@ void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_mes
   portEXIT_CRITICAL(&seenMessagesMutex);
 }
 
+// --- START: NEW Promiscuous Mode Callback ---
+/**
+ * @brief This callback is triggered for EVERY 802.11 packet seen on the channel
+ * when promiscuous mode is enabled.
+ * @note This function MUST be extremely fast. Do not Serial.print or do
+ * complex calculations here. It runs at a high interrupt priority.
+ */
+void promiscuousRxCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
+    // We only care about RSSI, not packet type or content
+    if (isPromiscuousCheckActive) {
+        wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+        
+        // Atomically update the RSSI totals by accessing the member directly
+        portENTER_CRITICAL_ISR(&lastSeenPeersMutex); // Re-using a mutex
+        totalRssi += pkt->rx_ctrl.rssi; // CORRECTED
+        rssiSampleCount++;
+        portEXIT_CRITICAL_ISR(&lastSeenPeersMutex);
+    }
+}
+
 void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len) {
   if (len != sizeof(esp_now_message_t)) {
     return;
@@ -704,6 +737,11 @@ void manageLocalDisplayLog() {
     portEXIT_CRITICAL(&localDisplayLogMutex);
 }
 
+// --- REMOVED: calculateCbp() ---
+// The esp_wifi_get_cca_info() function is not available in the Arduino core.
+// This function has been removed and replaced with the promiscuous mode RSSI check.
+// --- END REMOVED ---
+
 // WiFi event handler to track unique client connections to the AP
 void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     if (event == ARDUINO_EVENT_WIFI_AP_STACONNECTED) {
@@ -829,6 +867,13 @@ void setup() {
 
   esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
 
+  // --- NEW: Initialize Promiscuous Mode Callback ---
+  // We register the callback, but do NOT enable promiscuous mode.
+  // It will be enabled on-demand by the jamming detector.
+  esp_wifi_set_promiscuous_rx_cb(promiscuousRxCallback);
+  esp_wifi_set_promiscuous(false);
+  // --- END NEW ---
+
 #if USE_DISPLAY
   tft.begin();
   tft.setRotation(1);
@@ -918,10 +963,25 @@ void loop() {
   IsrQueueMessage qMsg;
   while (xQueueReceive(messageQueue, &qMsg, 0) == pdPASS) {
     lastMessageReceivedTimestamp = millis();
+    
+    // --- NEW: Abort any pending promiscuous check if we get a valid packet ---
+    if (isPromiscuousCheckActive) {
+        esp_wifi_set_promiscuous(false);
+        isPromiscuousCheckActive = false;
+        if(VERBOSE_MODE) Serial.println("Received valid packet. Aborting promiscuous jamming check.");
+    }
+    // --- END NEW ---
+
     if (isCurrentlyJammed) {
         isCurrentlyJammed = false;
         communicationRestoredTimestamp = millis();
         if(VERBOSE_MODE) Serial.println("Communication restored. Jamming appears to have stopped.");
+
+        // --- NEW: Reset promiscuous mode just in case ---
+        esp_wifi_set_promiscuous(false);
+        isPromiscuousCheckActive = false;
+        // --- END NEW ---
+
         if (lastJammingEventTimestamp > 0) {
             lastJammingDurationPersisted = millis() - lastJammingEventTimestamp;
             securityCountersDirty = true;
@@ -1172,31 +1232,90 @@ void loop() {
     if(VERBOSE_MODE) Serial.println("Message processed from queue: Node " + originalSenderMacSuffix + " - " + incomingContent);
   }
 
+  // --- REMOVED: Periodic CBP Check ---
+  // This logic was removed as it was non-functional and
+  // has been replaced by the on-demand promiscuous check below.
+  // --- END REMOVED ---
+
   // --- Jamming Detection Logic ---
   bool hasPeers = false;
   portENTER_CRITICAL(&lastSeenPeersMutex);
   hasPeers = lastSeenPeers.size() > 1;
   portEXIT_CRITICAL(&lastSeenPeersMutex);
 
-  if (hasPeers && !isCurrentlyJammed && (millis() - lastMessageReceivedTimestamp > JAMMING_DETECTION_THRESHOLD_MS)) {
-      if(VERBOSE_MODE) Serial.println("Jamming detected: No messages received from known peers for threshold duration.");
-      isCurrentlyJammed = true;
-      if (lastJammingEventTimestamp == 0) {
-          lastJammingEventTimestamp = millis();
-          jammingIncidentCount++;
-          lastJammingTimestampPersisted = millis();
-          securityCountersDirty = true;
-          if(VERBOSE_MODE) Serial.printf("New jamming incident logged. Total incidents: %u\n", jammingIncidentCount);
-          addDisplayLog("Jamming event detected!");
-      }
-      if (millis() - lastJammingAlertSent > JAMMING_ALERT_COOLDOWN_MS) {
-          if(VERBOSE_MODE) Serial.println("Sending jamming alert to the mesh.");
-          char alertContent[MAX_PAYLOAD_LEN];
-          snprintf(alertContent, sizeof(alertContent), "Jamming Alert from %s", MAC_suffix_str.c_str());
-          createAndSendMessage(alertContent, strlen(alertContent), MSG_TYPE_JAMMING_ALERT);
-          lastJammingAlertSent = millis();
+  // --- START: NEW On-Demand Jamming Detection (RSSI-based) ---
+  
+  // Step 1: Is a promiscuous check already active?
+  if (isPromiscuousCheckActive) {
+      // Check if the sampling window is over
+      if (millis() - promiscuousCheckStartTime > PROMISCUOUS_SAMPLE_DURATION_MS) {
+          
+          // 1. Stop the check to save power
+          esp_wifi_set_promiscuous(false);
+          isPromiscuousCheckActive = false;
+          if(VERBOSE_MODE) Serial.println("Promiscuous sampling complete. Analyzing noise floor...");
+
+          // 2. Analyze the data
+          float avgRssi = -100.0; // Default to a "quiet" value
+          if (rssiSampleCount > 0) {
+              avgRssi = (float)totalRssi / rssiSampleCount;
+              if(VERBOSE_MODE) Serial.printf("Avg RSSI: %.1f dBm (from %d packets)\n", avgRssi, rssiSampleCount);
+          } else {
+              if(VERBOSE_MODE) Serial.println("No packets sniffed during check.");
+          }
+
+          // 3. Make the decision (Factor 2)
+          if (avgRssi > RSSI_JAMMING_THRESHOLD) {
+              // --- JAMMING CONFIRMED ---
+              // We have packet loss (Factor 1) AND a high noise floor (Factor 2)
+              if(VERBOSE_MODE) Serial.println("Jamming confirmed: Packet loss AND high noise floor.");
+              isCurrentlyJammed = true;
+              if (lastJammingEventTimestamp == 0) {
+                  lastJammingEventTimestamp = millis();
+                  jammingIncidentCount++;
+                  lastJammingTimestampPersisted = millis();
+                  securityCountersDirty = true;
+                  if(VERBOSE_MODE) Serial.printf("New jamming incident logged. Total incidents: %u\n", jammingIncidentCount);
+                  addDisplayLog("Jamming event detected!");
+              }
+              // Send an alert if cooldown has passed
+              if (millis() - lastJammingAlertSent > JAMMING_ALERT_COOLDOWN_MS) {
+                  if(VERBOSE_MODE) Serial.println("Sending jamming alert to the mesh.");
+                  char alertContent[MAX_PAYLOAD_LEN];
+                  snprintf(alertContent, sizeof(alertContent), "Jamming Alert from %s", MAC_suffix_str.c_str());
+                  createAndSendMessage(alertContent, strlen(alertContent), MSG_TYPE_JAMMING_ALERT);
+                  lastJammingAlertSent = millis();
+              }
+          } else {
+              // --- FALSE ALARM ---
+              // We have packet loss, but the channel is quiet.
+              if(VERBOSE_MODE) Serial.println("False alarm: Packet loss but channel is quiet. Peers likely offline.");
+              // Reset the main timer to avoid constant re-triggering
+              lastMessageReceivedTimestamp = millis(); 
+          }
       }
   }
+  // Step 2: Do we NEED to start a check?
+  // (Factor 1: Have we lost contact with peers for the threshold duration?)
+  else if (hasPeers && !isCurrentlyJammed && (millis() - lastMessageReceivedTimestamp > JAMMING_DETECTION_THRESHOLD_MS)) {
+      
+      // Do not flag jamming yet.
+      // Instead, start the on-demand promiscuous check to verify (Factor 2).
+      if(VERBOSE_MODE) Serial.println("Packet loss detected (Factor 1). Starting promiscuous check (Factor 2)...");
+      
+      // 1. Reset counters
+      portENTER_CRITICAL(&lastSeenPeersMutex); // Re-using a mutex
+      totalRssi = 0;
+      rssiSampleCount = 0;
+      portEXIT_CRITICAL(&lastSeenPeersMutex);
+      
+      // 2. Start the check
+      isPromiscuousCheckActive = true;
+      promiscuousCheckStartTime = millis();
+      esp_wifi_set_promiscuous(true);
+  }
+  // --- END: NEW On-Demand Jamming Detection ---
+
 
   // --- Jamming Long-Term Memory Reset Logic ---
   if (lastJammingEventTimestamp > 0 && !isCurrentlyJammed && communicationRestoredTimestamp > 0 &&
