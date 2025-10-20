@@ -167,7 +167,13 @@ DNSServer dnsServer;
 // THIS ARRAY MUST BE 20 BYTES LONG.
 // The first 4 bytes (DE AD BE EF) are "magic bytes" that the web flasher
 // searches for. The flasher then *replaces* the 16 bytes that follow.
-const uint8_t PRE_SHARED_KEY[] = {
+//
+// ***** THE FIX *****
+// The 'volatile' keyword is critical here. It tells the compiler that this
+// memory can be changed by an external process (our flasher tool). This
+// FORCES the compiler to generate code that reads the key from memory at
+// runtime in setup(), preventing it from optimizing away the security check.
+volatile uint8_t PRE_SHARED_KEY[] = {
   0xDE, 0xAD, 0xBE, 0xEF, // 4-byte Magic prefix for the flasher
   0x7C, 0xE3, 0x91, 0x2F, 0xA8, 0x5D, 0xB4, 0x69, // 16-byte Default PSK
   0x3E, 0xC7, 0x14, 0xF2, 0x86, 0x0B, 0xD9, 0x4A
@@ -493,7 +499,7 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
 
   // Decrypt content using the appropriate key.
   // --- FLASHER FIX: Use (PRE_SHARED_KEY + 4) to skip magic bytes ---
-  const uint8_t* keyToUse = PRE_SHARED_KEY + 4;
+  const uint8_t* keyToUse = (const uint8_t*)PRE_SHARED_KEY + 4;
   if (useSessionKey && qMsg.messageData.messageType != MSG_TYPE_PASSWORD_UPDATE) {
       keyToUse = sessionKey;
   }
@@ -602,7 +608,7 @@ void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len,
 
   // Determine the key to use for HMAC and Encryption
   // --- FLASHER FIX: Use (PRE_SHARED_KEY + 4) to skip magic bytes ---
-  const uint8_t* keyToUse = PRE_SHARED_KEY + 4; // Default to factory key
+  const uint8_t* keyToUse = (const uint8_t*)PRE_SHARED_KEY + 4; // Default to factory key
   if (useSessionKey && type != MSG_TYPE_PASSWORD_UPDATE) {
       keyToUse = sessionKey;
   }
@@ -750,15 +756,27 @@ void setup() {
   // --- START MODIFIED LOGIC ---
   // Determine operational mode based on the PSK at boot time.
 
-  // Define the factory key again for comparison.
-  // This is the known, default key. It is only used to check if the active key has been changed.
-  const uint8_t FACTORY_KEY[] = {
-    0x7C, 0xE3, 0x91, 0x2F, 0xA8, 0x5D, 0xB4, 0x69,
-    0x3E, 0xC7, 0x14, 0xF2, 0x86, 0x0B, 0xD9, 0x4A
-  };
+  // --- START FLASHER FIX (RUNTIME KEY) ---
+  // Define the factory key as a string literal of hex escape codes.
+  // This prevents the compiler from treating it as an identical const array
+  // for optimization purposes.
+  const char* factory_key_string = "\x7C\xE3\x91\x2F\xA8\x5D\xB4\x69"
+                                   "\x3E\xC7\x14\xF2\x86\x0B\xD9\x4A";
+
+  // Create a buffer on the stack to hold the key at runtime.
+  uint8_t factory_key_runtime[16];
+
+  // Copy the key into the stack buffer.
+  // Because this is a runtime operation (memcpy), the compiler
+  // CANNOT optimize away the comparison.
+  memcpy(factory_key_runtime, factory_key_string, 16);
+  // --- END FLASHER FIX (RUNTIME KEY) ---
+  
 
   // --- FLASHER FIX: Compare (PRE_SHARED_KEY + 4) to skip magic bytes ---
-  if (memcmp(PRE_SHARED_KEY + 4, FACTORY_KEY, sizeof(FACTORY_KEY)) == 0) {
+  // Because PRE_SHARED_KEY is volatile AND factory_key_runtime is a runtime variable,
+  // this memcmp is FORCED to execute at runtime, defeating the optimizer.
+  if (memcmp((const void*)(PRE_SHARED_KEY + 4), factory_key_runtime, 16) == 0) {
     // The key IS the default factory key.
     isUsingDefaultPsk = true;
     if(VERBOSE_MODE) Serial.println("Operating Mode: Compatibility. Awaiting organizer password to secure mesh.");
@@ -771,7 +789,7 @@ void setup() {
     
     // Immediately adopt the flashed key as the session key for mesh communication.
     // --- FLASHER FIX: Copy from (PRE_SHARED_KEY + 4) to skip magic bytes ---
-    memcpy(sessionKey, PRE_SHARED_KEY + 4, 16);
+    memcpy(sessionKey, (const void*)(PRE_SHARED_KEY + 4), 16);
     useSessionKey = true;
     
     // Set the initial web UI password to the default value. The organizer will
@@ -952,7 +970,7 @@ void loop() {
         // Need to re-create the [HMAC | payload] structure for caching
         esp_now_message_t encryptedForCache = incomingMessage;
         // --- FLASHER FIX: Use (PRE_SHARED_KEY + 4) to skip magic bytes ---
-        const uint8_t* keyToUse = useSessionKey ? sessionKey : (PRE_SHARED_KEY + 4);
+        const uint8_t* keyToUse = useSessionKey ? sessionKey : (const uint8_t*)(PRE_SHARED_KEY + 4);
         
         char payload_for_hmac[MAX_PAYLOAD_LEN];
         strncpy(payload_for_hmac, incomingMessage.content, MAX_PAYLOAD_LEN - 1);
@@ -1085,7 +1103,7 @@ void loop() {
     // We must re-create the [HMAC | payload] structure and re-encrypt it for the cache
     esp_now_message_t encryptedForCache = incomingMessage; // incomingMessage has plaintext *payload only*
     // --- FLASHER FIX: Use (PRE_SHARED_KEY + 4) to skip magic bytes ---
-    const uint8_t* keyToUseForCache = PRE_SHARED_KEY + 4; // Default to PSK
+    const uint8_t* keyToUseForCache = (const uint8_t*)PRE_SHARED_KEY + 4; // Default to PSK
     if(useSessionKey && encryptedForCache.messageType != MSG_TYPE_PASSWORD_UPDATE) {
         keyToUseForCache = sessionKey; // Use session key for normal traffic
     }
