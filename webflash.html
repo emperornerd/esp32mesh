@@ -588,7 +588,7 @@
       <h3 id="secureOverrideTitle">Enable Secure Mode?</h3>
       <p>You attempted to select Secure Mode, but Secure Mode is currently disabled. How would you like to proceed?</p>
       <ul style="color:var(--medium-text)">
-        <li><strong>Enable for this session:</strong> Immediately enable Secure Mode for this tab only (temporary). No reload required. Useful for flashing several devices in one session.</li>
+        <li><strong>Enable for this session:</strong> Immediately enable Secure Mode for this tab only (temporary). This is a development and test feature. Currently the only SECURE way to flash this is manually changing the PSK in code.</li>
         <li><strong>Cancel:</strong> Stay in Compatibility Mode.</li>
       </ul>
       <div class="actions">
@@ -749,11 +749,13 @@
         sessionPskDisplay.textContent = `Session PSK: ${obfuscatedPsk}`;
         sessionPskDisplay.style.color = 'var(--light-text)';
 
-        const manifest = await (await fetch('./manifest.json')).json();
+        // *** MODIFIED to add cache-buster ***
+        const manifest = await (await fetch('./manifest.json?t=' + Date.now())).json();
         const firmwarePart = manifest.builds[0].parts.find(part => part.path.includes("sketch_jun11a.ino.merged.bin"));
         if (!firmwarePart) throw new Error("Could not find firmware part in manifest.");
         
-        const response = await fetch(firmwarePart.path);
+        // *** MODIFIED to add cache-buster ***
+        const response = await fetch(firmwarePart.path + '?t=' + Date.now());
         if (!response.ok) throw new Error(`Failed to fetch firmware: ${response.statusText}`);
         const firmwareData = new Uint8Array(await response.arrayBuffer());
 
@@ -781,6 +783,14 @@
         if(flashBtn) flashBtn.disabled = false;
         downloadSecureBtn.disabled = false;
 
+        // *** ADDED: Set manifest *after* blob is ready ***
+        // Now that the blob is ready, set the manifest on the component
+        // to wake it up and make it ready to flash.
+        if (installButton) {
+          installButton.manifest = './manifest.json?t=' + Date.now();
+        }
+        // *** END ADDED BLOCK ***
+
       } catch(e) {
         log(`Error preparing secure firmware: ${e.message}`, 'error');
         sessionPskDisplay.textContent = "Error! Check console.";
@@ -795,7 +805,18 @@
       newInstallButton.patchManifest = patchManifestFn;
       newInstallButton.addEventListener('state-changed', onStateChanged);
       newInstallButton.addEventListener('error', onError);
-      newInstallButton.manifest = './manifest.json';
+
+      // *** MODIFIED LOGIC ***
+      const modeEl = document.querySelector('input[name="flashMode"]:checked');
+      const mode = modeEl ? modeEl.value : 'compatibility';
+
+      // Only set the manifest immediately if in compatibility mode.
+      // This prevents the pre-fetch/cache in Secure Mode.
+      if (mode === 'compatibility') {
+        newInstallButton.manifest = './manifest.json?t=' + Date.now(); // Added cache-buster
+      }
+      // *** END MODIFIED LOGIC ***
+
       newInstallButton.innerHTML = `<button slot="activate" id="flashBtn" class="btn">⚡ Flash Firmware</button>`;
       buttonContainer.appendChild(newInstallButton);
       installButton = newInstallButton;
@@ -834,6 +855,8 @@
       const mode = modeEl ? modeEl.value : 'compatibility';
       if (mode === 'compatibility') { 
         log('Flashing in Compatibility Mode (using default PSK)');
+        // *** ADD cache-buster to compatibility mode path ***
+        firmwarePart.path = firmwarePart.path + '?t=' + Date.now();
         return manifestCopy;
       }
       if (mode === 'secure') {
@@ -989,6 +1012,12 @@
         radioSecure.checked = true;
         secureModeControls.style.display = 'block';
         compatibilityModeControls.style.display = 'none';
+        
+        // *** MODIFIED: Manually call component recreation and secure prep ***
+        log('Mode changed. Re-initializing flasher component...');
+        createFlasherComponent();
+        const newFlashBtn = document.getElementById('flashBtn');
+        if (newFlashBtn) newFlashBtn.disabled = true;
         prepareSecureFirmware();
     });
 
@@ -1019,11 +1048,10 @@
         }
     });
 
-    // Radio change behavior: if secure selected while not enabled, show modal override (programmatic changes)
+    // *** MODIFIED: This listener now recreates the component on change ***
     document.querySelectorAll('input[name="flashMode"]').forEach(radio => {
       radio.addEventListener('change', (e) => {
         const mode = e.target.value;
-        const flashBtn = document.getElementById('flashBtn');
 
         if (mode === 'secure' && !isSecureModeEnabled) {
             // do not allow immediate selection; prompt user for override choices
@@ -1042,11 +1070,18 @@
         compatibilityModeControls.style.display = isSecureMode ? 'none' : 'block';
         secureModeDisabledMessage.style.display = 'none'; // Ensure message is hidden if secure mode is enabled
 
+        // *** ADDED: Re-create the flasher component to bust its internal cache ***
+        log('Mode changed. Re-initializing flasher component...');
+        createFlasherComponent(); 
+        // *** END ADDED BLOCK ***
+
+        // Now, get the *new* button and apply logic
+        const newFlashBtn = document.getElementById('flashBtn');
         if (isSecureMode) {
-          if(flashBtn) flashBtn.disabled = true;
-          prepareSecureFirmware();
-        } else if (flashBtn) {
-          flashBtn.disabled = false;
+          if(newFlashBtn) newFlashBtn.disabled = true; // Button is disabled by default in createFlasherComponent
+          prepareSecureFirmware(); // This will create the blob and re-enable the button
+        } else if (newFlashBtn) {
+          newFlashBtn.disabled = false;
         }
       });
     });
@@ -1109,19 +1144,24 @@
         sessionStorage.setItem('uploadMode', 'true');
         // Trigger the main flasher button's click event
         if (installButton) {
+            
+            // *** MODIFIED to add cache-buster ***
+            installButton.manifest = './manifest.json?t=' + Date.now();
+            
             installButton.querySelector('button').click();
         } else {
             log('Flasher component not ready.', 'error');
         }
     });
 
-    // --- Initial Setup ---
+    // *** MODIFIED: Added cache-busters to initial setup ***
     (async () => {
       try {
-        const manifestRes = await fetch('./manifest.json');
+        const cacheBust = '?t=' + Date.now(); // Define cache-buster
+        const manifestRes = await fetch('./manifest.json' + cacheBust); // MODIFIED
         if (!manifestRes.ok) throw new Error(`manifest.json HTTP ${manifestRes.status}`);
         log('manifest.json found');
-        const firmwareRes = await fetch('./sketch_jun11a.ino.merged.bin', { method: 'HEAD' });
+        const firmwareRes = await fetch('./sketch_jun11a.ino.merged.bin' + cacheBust, { method: 'HEAD' }); // MODIFIED
         if (!firmwareRes.ok) throw new Error(`sketch_jun11a.ino.merged.bin HTTP ${firmwareRes.status}`);
         log('sketch_jun11a.ino.merged.bin found');
       } catch (e) {
