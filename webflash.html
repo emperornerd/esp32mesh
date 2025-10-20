@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Protest Node Flash Tool</title>
-  <link rel="icon" href="/ico.png" type="image/png">
+  <link rel="icon" href="ico.png" type="image/png">
   <style>
     :root {
       --primary-color: #0066cc;
@@ -509,6 +509,8 @@
         <label><input type="radio" name="flashMode" value="secure" id="radioSecure"> Secure Mode</label>
       </div>
       
+      <div class="button-container" id="buttonContainer">
+      </div>
       <div id="compatibility-mode-controls" style="text-align: center; margin: 20px 0;">
          <a href="./sketch_jun11a.ino.merged.bin" download="unmodified_firmware.bin" style="text-decoration: none;">
             <button class="btn btn-secondary">Download Unmodified Firmware</button>
@@ -522,7 +524,6 @@
           <h4>Secure Mode: Feature in Development</h4>
           <p>The functionality to generate a unique session key and flash patched firmware directly from the web tool is currently under development.</p>
           <p>For enhanced security, we recommend you change the Pre-Shared Key (PSK) manually in the source code and flash your devices using the Arduino IDE.</p>
-          <p>You can find the source code on our GitHub:</p>
           <p><a href="https://github.com/emperornerd/esp32mesh" target="_blank">github.com/emperornerd/esp32mesh</a></p>
           <button id="overrideSecureBtn" class="btn btn-secondary" style="margin-top: 15px;">
             Loading Toggle State...
@@ -531,6 +532,10 @@
 
       <div id="secure-mode-controls" style="display: none; text-align: center; margin: 20px 0;">
         
+        <button id="downloadSecureBtn" class="btn btn-secondary" disabled>
+          Download Patched Secure Firmware
+        </button>
+        
         <div class="psk-display-wrapper">
             <div id="sessionPskDisplay">
               Session PSK will be generated automatically...
@@ -538,13 +543,6 @@
              <button id="clearPskBtn" title="Start New Secure Session (Clear Key)">
                 &#x21BB; </button>
         </div>
-        
-        <button id="downloadSecureBtn" class="btn btn-secondary" style="margin-top: 15px;" disabled>
-          Download Patched Secure Firmware
-        </button>
-      </div>
-
-      <div class="button-container" id="buttonContainer">
       </div>
 
       <details class="advanced-section">
