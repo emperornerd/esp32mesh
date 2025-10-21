@@ -61,6 +61,10 @@ const unsigned long AP_INACTIVITY_TIMEOUT_SEC = 600; // 10 minutes to drop inact
 #define MSG_TYPE_STATUS_RESPONSE 8
 #define MSG_TYPE_JAMMING_ALERT 9
 
+// --- NEW: KDF (Key Derivation) Constants ---
+const int MESH_KDF_ITERATIONS = 1000; // 1000x harder to crack than 1 hash
+const char* MESH_KDF_SALT = "ProtestMeshSalt456TUV";
+
 // Command prefixes
 const char* CMD_PREFIX = "CMD::";
 const char* CMD_PUBLIC_ON = "CMD::PUBLIC_ON";
@@ -76,7 +80,7 @@ typedef struct __attribute__((packed)) {
 } esp_now_message_t;
 
 // This initial password is used once at setup to generate the initial hash for the web UI.
-const char* WEB_PASSWORD = "rasyKWubTVdC2VrLKyfBzfRj";
+const char* WEB_PASSWORD = "password";
 // Stores the hash of the organizer password for web UI authentication.
 String hashedOrganizerPassword;
 
@@ -250,13 +254,43 @@ String simpleHash(const String& input) {
 
 // Derives a 16-byte session key from a password and sets state. All changes are VOLATILE.
 void deriveAndSetSessionKey(const String& password) {
-    unsigned char hash[32];
-    mbedtls_sha256((const unsigned char*)password.c_str(), password.length(), hash, 0);
-    memcpy(sessionKey, hash, 16); // Use first 16 bytes of SHA-256 hash as the AES key
+    unsigned char hash[32]; // 32 bytes for SHA-256
+    
+    // --- NEW: Key Stretching Loop (PBKDF2-lite) ---
+    mbedtls_md_context_t ctx;
+    const mbedtls_md_info_t* md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    
+    mbedtls_md_init(&ctx);
+    mbedtls_md_setup(&ctx, md_info, 1); // 1 = hmac
+
+    const unsigned char* pass_bytes = (const unsigned char*)password.c_str();
+    size_t pass_len = password.length();
+    const unsigned char* salt_bytes = (const unsigned char*)MESH_KDF_SALT;
+    size_t salt_len = strlen(MESH_KDF_SALT);
+
+    // 1. First round: HMAC(password, salt)
+    mbedtls_md_hmac_starts(&ctx, pass_bytes, pass_len);
+    mbedtls_md_hmac_update(&ctx, salt_bytes, salt_len);
+    mbedtls_md_hmac_finish(&ctx, hash);
+
+    // 2. Subsequent rounds: HMAC(password, previous_hash)
+    for (int i = 1; i < MESH_KDF_ITERATIONS; i++) {
+        unsigned char temp_hash[32];
+        memcpy(temp_hash, hash, 32); // Save previous hash
+
+        mbedtls_md_hmac_starts(&ctx, pass_bytes, pass_len);
+        mbedtls_md_hmac_update(&ctx, temp_hash, 32); // Hash the previous hash
+        mbedtls_md_hmac_finish(&ctx, hash);
+    }
+    
+    mbedtls_md_free(&ctx);
+    // --- END: Key Stretching ---
+
+    memcpy(sessionKey, hash, 16); // Use first 16 bytes of the *final* hash as the AES key
     useSessionKey = true;
     passwordChangeLocked = true;
     hashedOrganizerPassword = simpleHash(password); // For web UI authentication
-    if(VERBOSE_MODE) Serial.println("Volatile session key derived from password.");
+    if(VERBOSE_MODE) Serial.println("Volatile session key derived from password (stretched).");
 }
 
 // This function is still used for *internal* display logs, not for network message security.
