@@ -80,7 +80,7 @@ typedef struct __attribute__((packed)) {
 } esp_now_message_t;
 
 // This initial password is used once at setup to generate the initial hash for the web UI.
-const char* WEB_PASSWORD = "password";
+const char* WEB_PASSWORD = "4kfu4ofkf0w020ijfkus9w98";
 // Stores the hash of the organizer password for web UI authentication.
 String hashedOrganizerPassword;
 
