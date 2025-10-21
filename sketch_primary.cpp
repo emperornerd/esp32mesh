@@ -812,9 +812,20 @@ void setup() {
   
 
   // --- FLASHER FIX: Compare (PRE_SHARED_KEY + 4) to skip magic bytes ---
-  // Because PRE_SHARED_KEY is volatile AND factory_key_runtime is a runtime variable,
-  // this memcmp is FORCED to execute at runtime, defeating the optimizer.
-  if (memcmp((const void*)(PRE_SHARED_KEY + 4), factory_key_runtime, 16) == 0) {
+  // We must use a manual, byte-by-byte comparison loop.
+  // Using memcmp() can fail to compile because it's not guaranteed to
+  // respect the 'volatile' qualifier and can cause a cast-discards-qualifier error.
+  // This loop forces the compiler to read each volatile byte individually.
+  bool keysMatch = true;
+  for (int i = 0; i < 16; i++) {
+      // (PRE_SHARED_KEY + 4) points to the start of the 16-byte key
+      if (PRE_SHARED_KEY[i + 4] != factory_key_runtime[i]) {
+          keysMatch = false;
+          break;
+      }
+  }
+  
+  if (keysMatch) {
     // The key IS the default factory key.
     isUsingDefaultPsk = true;
     if(VERBOSE_MODE) Serial.println("Operating Mode: Compatibility. Awaiting organizer password to secure mesh.");
@@ -827,7 +838,10 @@ void setup() {
     
     // Immediately adopt the flashed key as the session key for mesh communication.
     // --- FLASHER FIX: Copy from (PRE_SHARED_KEY + 4) to skip magic bytes ---
-    memcpy(sessionKey, (const void*)(PRE_SHARED_KEY + 4), 16);
+    // We must also copy byte-by-byte to respect the volatile source.
+    for (int i = 0; i < 16; i++) {
+        sessionKey[i] = PRE_SHARED_KEY[i + 4];
+    }
     useSessionKey = true;
     
     // Set the initial web UI password to the default value. The organizer will
