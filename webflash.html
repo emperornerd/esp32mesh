@@ -42,7 +42,7 @@
       margin-left: 450px;
     }
     .container {
-      max-width: 900px;
+      max-width: 900px; /* The maximum width of the content area */
       margin: 0 auto;
       padding-bottom: 40px;
     }
@@ -51,21 +51,35 @@
       margin: 20px 0 30px 0;
       font-size: 32px;
     }
+    
     .info-box {
       background: var(--medium-bg);
       border-radius: 8px;
       padding: 20px;
-      margin-bottom: 20px;
+      margin: 20px auto 20px auto; 
       border: 1px solid var(--border-color);
     }
+
     .info-row {
       display: flex;
       justify-content: space-between;
       margin: 8px 0;
       font-size: 14px;
     }
-    .info-label { color: var(--medium-text); }
-    .info-value { font-weight: bold; }
+    
+    .info-label { 
+      color: var(--medium-text);
+      flex-shrink: 0; 
+      padding-right: 15px; 
+    }
+    .info-value { 
+      font-weight: bold;
+      text-align: right; 
+      overflow-wrap: break-word; 
+      word-break: break-word; 
+      min-width: 0; /* ADDED: Allows flex item to shrink below content size and wrap */
+    }
+    
     .status-good { color: var(--success-color); }
     .status-bad { color: var(--error-color); }
     
@@ -79,7 +93,7 @@
       border: 1px solid var(--border-color);
       border-radius: 8px;
       padding: 20px;
-      margin: 20px 0;
+      margin: 20px auto; /* Centers the block, allowing it to take full container width */
       text-align: center;
     }
     .flash-mode-section label {
@@ -134,7 +148,7 @@
       background: var(--secondary-hover);
     }
     
-    /* NEW: Style for Modal Cancel Button (Neutral/Dark) */
+    /* Style for Neutral/Dark Buttons */
     .btn-neutral {
         background: #444;
         color: var(--light-text); 
@@ -149,7 +163,7 @@
       border-left: 4px solid #fb923c;
       padding: 15px 20px;
       border-radius: 6px;
-      margin: 20px 0;
+      margin: 20px auto; /* Centers the block, allowing it to take full container width */
       font-size: 14px;
     }
     
@@ -159,7 +173,7 @@
       border-left: 4px solid #0088ff;
       padding: 15px 20px;
       border-radius: 6px;
-      margin: 20px 0;
+      margin: 20px auto; /* Centers the block, allowing it to take full container width */
       font-size: 14px;
       display: none;
     }
@@ -169,7 +183,7 @@
       background: var(--medium-bg);
       border-radius: 8px;
       padding: 20px;
-      margin-top: 30px;
+      margin: 20px auto 0 auto; /* MODIFIED: Changed top margin from 30px to 20px */
       font-size: 14px;
       line-height: 1.6;
       border: 1px solid var(--border-color);
@@ -180,7 +194,7 @@
       border: 1px solid var(--border-color);
       border-radius: 8px;
       padding: 18px 20px;
-      margin: 20px 0;
+      margin: 20px auto; /* Centers the block, allowing it to take full container width */
       font-size: 13px;
       line-height: 1.5;
     }
@@ -242,7 +256,6 @@
         text-align: left;
     }
 
-    /* NEW STYLES for subtle refresh button */
     #clearPskBtn {
         background: var(--medium-bg);
         color: var(--secondary-color);
@@ -266,17 +279,15 @@
         transform-origin: center;
     }
 
-    /* NEW: Styles for Advanced Section */
     .advanced-section {
         background: var(--medium-bg);
         border: 1px solid var(--border-color);
         border-radius: 8px;
-        margin-top: 20px;
+        margin: 20px auto; /* Centers the block, allowing it to take full container width */
     }
     .advanced-section summary {
-        /* CRITICAL FIX: Ensure clickability by aggressively promoting to top layer */
         position: relative;
-        z-index: 9999; 
+        z-index: 100;
         font-size: 16px;
         font-weight: bold;
         padding: 15px 20px;
@@ -289,7 +300,6 @@
     .advanced-content {
         padding: 0 20px 20px 20px;
         border-top: 1px solid var(--border-color);
-        text-align: center;
     }
     .advanced-content p {
         font-size: 13px;
@@ -308,85 +318,76 @@
         background: #555;
     }
     
-    /* MODIFIED: Style for the header link (Top Right) */
+    /* Styles for subsections within Advanced */
+    .advanced-subsection {
+        border: 1px solid var(--border-color);
+        border-radius: 6px;
+        padding: 15px;
+        margin-top: 20px;
+        background: rgba(0,0,0,0.2);
+    }
+    .advanced-subsection h4 {
+        margin-top: 0;
+        color: var(--light-text);
+        border-bottom: 1px solid var(--border-color);
+        padding-bottom: 8px;
+    }
+    
     .header-link {
         position: absolute;
         top: 20px;
-        right: 20px; /* MODIFIED from left: 20px */
-        color: var(--medium-text); /* #aaa */
+        right: 20px; 
+        color: var(--medium-text);
         text-decoration: none;
         font-size: 14px;
         transition: color 0.2s;
     }
     .header-link:hover {
-        color: var(--light-text); /* #eee */
+        color: var(--light-text);
     }
     .header-link span {
-        margin-left: 5px; /* MODIFIED from margin-right: 5px */
+        margin-left: 5px;
     }
-
-    /* NEW: Styles for Disabled Secure Mode Message */
-    #secure-mode-disabled-message {
-        background: var(--medium-bg); /* Changed from #444 to match other sections */
-        border: 1px solid var(--border-color); /* Changed from #777 */
-        color: var(--light-text);
-        padding: 20px;
-        border-radius: 8px;
-        margin: 20px 0;
-        text-align: left;
-    }
-    #secure-mode-disabled-message h4 {
-        color: #ff9;
-        margin-top: 0;
-    }
-    #secure-mode-disabled-message a {
-        color: #8ab4f8;
+    /* ADDED STYLES FOR SECOND HEADER LINK */
+    .header-link-left {
+        position: absolute;
+        top: 20px;
+        left: 20px;
+        color: var(--medium-text);
         text-decoration: none;
+        font-size: 14px;
+        transition: color 0.2s;
     }
-    #secure-mode-disabled-message a:hover {
-        text-decoration: underline;
+    .header-link-left:hover {
+        color: var(--light-text);
     }
-    
-    /* Center the override button */
-    #secure-mode-disabled-message button {
-        display: block;
-        margin: 15px auto 0 auto;
-        width: auto;
+    .header-link-left span {
+        margin-right: 5px;
     }
+    /* END ADDED STYLES */
 
-    /* Modal for override prompt */
-    .modal-overlay {
-      position: fixed;
-      inset: 0;
-      background: rgba(0,0,0,0.6);
-      display: none;
-      align-items: center;
-      justify-content: center;
-      z-index: 2000;
+    /* Class for Secure Mode Box */
+    .secure-mode-box {
+        background: var(--medium-bg);
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        padding: 20px;
+        margin: 20px auto; /* Centers the block, allowing it to take full container width */
+        text-align: center;
     }
-    .modal-overlay.show { display: flex; }
-    .modal {
-      background: #1f1f1f;
-      border: 1px solid var(--border-color);
-      border-radius: 8px;
-      padding: 20px;
-      width: 90%;
-      max-width: 520px;
-      color: var(--light-text);
-    }
-    .modal h3 { margin-top: 0; }
-    .modal p { color: var(--medium-text); }
-    .modal .actions { margin-top: 16px; display:flex; gap: 10px; justify-content: flex-end; }
-    .modal .actions button { min-width: 140px; }
 
     @media (max-width: 768px) {
       .mode-grid {
         grid-template-columns: 1fr;
       }
-      /* MODIFIED: Move link to top right on mobile */
       .header-link {
         top: 10px;
-        right: 10px; /* MODIFIED from left: 10px */
+        right: 10px;
+      }
+      /* Adjust for small screens */
+      .header-link-left {
+        top: 40px; /* Push down to clear logo/title area if necessary */
+        left: 10px;
       }
     }
     
@@ -473,6 +474,9 @@
       <a href="index.html" class="header-link">
         Back to Project Home <span>&larr;</span>
       </a>
+      <a href="directions.html" class="header-link-left">
+        <span>&rarr;</span> Advanced Flashing Directions
+      </a>
       <h1>Protest Node Flash Tool</h1>
       
       <div class="warning">
@@ -481,7 +485,7 @@
           <li>Close any serial monitor programs (Arduino IDE, PuTTY, etc.)</li>
           <li>Close any other browser tabs using the ESP32</li>
           <li>Unplug and replug your ESP32 if needed</li>
-		  <li>If you have trouble connecting to the next device after a flash (if applicable) refresh the web page. If in secure mode, your session will be retained.</li>
+		  <li>If you have trouble connecting to the next device after a flash (if applicable) refresh the web page.</li>
         </ul>
       </div>
 
@@ -490,11 +494,11 @@
         <div class="mode-grid">
           <div class="mode-card">
             <h5>Compatibility Mode</h5>
-            <p>Uses the default symmetric key included in the public code. Suitable for testing but not secure for production deployment. All devices share the same PSK (encryption password, essentially). This means an adversary can extract the key from your source or firmware and inject or intercept traffic. This may be acceptable for testing or smaller events less likely to be directly targeted. The benefit is it’s easy to expand and use (you won’t have to reflash all your devices when you add more nodes or figure out how to use a BIN file).</p>
+            <p>Uses the default symmetric key included in the public code. Suitable for testing but not secure for production deployment. All devices share the same PSK (encryption password, essentially). This means an adversary can extract the key from your source or firmware and inject or intercept traffic. This may be acceptable for testing or smaller events less likely to be directly targeted. The benefit is it’s easy to expand and use (you won’t have to reflash all your devices when you add more nodes or figure out how to use a BIN file). <a href="directions.html#compatibility-mode" style="color: var(--secondary-color);">See full Compatibility Mode instructions.</a></p>
           </div>
           <div class="mode-card">
-            <h5>Secure Mode</h5>
-            <p>Generates a unique session PSK and patches the firmware before flashing. Each session uses a different key, replacing the public default PSK (encryption password, essentially) for enhanced security. All nodes must be flashed to that key, so either flash them all in one website session, or download the firmware (bin) and load it with Arduino IDE (for example). These nodes will not be able to communicate with nodes using the default key in compatibility mode. The nodes will have to all be reflashed upon getting new nodes OR you have to download and use the BIN instead of using the web flasher. If you fail to download the BIN on the first flash, all devices will have to be reflashed.</p>
+            <h5>Secure Mode (Recommended)</h5>
+            <p>This process requires you to **download a compiler kit** to create a unique, secure firmware file on your computer. The private key is generated locally and never leaves your machine. The build and flash process is entirely handled on your local machine using the kit. All nodes must be flashed with the resulting unique C<code>.bin</code> file. <a href="directions.html#secure-mode" style="color: var(--secondary-color);">See full Secure Mode instructions.</a></p>
           </div>
         </div>
       </div>
@@ -511,60 +515,89 @@
       
       <div class="button-container" id="buttonContainer">
       </div>
+      
       <div id="compatibility-mode-controls" style="text-align: center; margin: 20px 0;">
          <a href="./sketch_jun11a.ino.merged.bin" download="unmodified_firmware.bin" style="text-decoration: none;">
             <button class="btn btn-secondary">Download Unmodified Firmware</button>
          </a>
          <p style="font-size: 12px; color: var(--error-color); margin-top: 10px; max-width: 450px; margin-left: auto; margin-right: auto;">
-            <strong>Warning:</strong> This firmware is unmodified and uses a default, insecure key. It should only be used for testing purposes or situations where the threat is lower (smaller protests or other contexts where a compromise has less significant consequences).
+            <strong>Warning:</strong> This firmware is unmodified and uses a default, insecure key. It should only be used for testing purposes.
          </p>
       </div>
       
-      <div id="secure-mode-disabled-message" style="display: none;">
-          <h4>Secure Mode: Feature in Development</h4>
-          <p>The functionality to generate a unique session key and flash patched firmware directly from the web tool is currently under development.</p>
-          <p>For enhanced security, we recommend you change the Pre-Shared Key (PSK) manually in the source code and flash your devices using the Arduino IDE.</p>
-          <p><a href="https://github.com/emperornerd/esp32mesh" target="_blank">github.com/emperornerd/esp32mesh</a></p>
-          <button id="overrideSecureBtn" class="btn btn-secondary" style="margin-top: 15px;">
-            Loading Toggle State...
-          </button>
-      </div>
-
-      <div id="secure-mode-controls" style="display: none; text-align: center; margin: 20px 0;">
-        
-        <button id="downloadSecureBtn" class="btn btn-secondary" disabled>
-          Download Patched Secure Firmware
-        </button>
-        
-        <div class="psk-display-wrapper">
-            <div id="sessionPskDisplay">
-              Session PSK will be generated automatically...
-            </div>
-             <button id="clearPskBtn" title="Start New Secure Session (Clear Key)">
-                &#x21BB; </button>
-        </div>
+      <div id="secure-mode-workflow" class="secure-mode-box" style="display: none;">
+          <h3 style="margin-top: 0;">Secure Mode: Build Firmware Locally</h3>
+          <p style="color: var(--medium-text); margin: 0 auto 20px auto;">
+            This is the recommended method for secure deployment. You must build the firmware on your computer to generate a unique key. The final flashing step is also completed on your workstation using the tools provided in the kit.
+          </p>
+          <a href="mesh.zip" download style="text-decoration: none;">
+            <button class="btn btn-secondary" style="font-size: 18px; padding: 15px 30px;">
+                Download Secure Flasher Kit (mesh.zip)
+            </button>
+          </a>
+          <div style="text-align: left; max-width: 600px; margin: 20px auto 0 auto; font-size: 14px; line-height: 1.6; border-top: 1px solid var(--border-color); padding-top: 15px;">
+            <strong>Process:</strong>
+            <ol>
+                <li>Download and extract the <code>mesh.zip</code> file.</li>
+                <li>Follow the <code>README.md</code> file inside to run the build script. This will generate a new, secure <code>firmware.bin</code> file and a script to flash it.</li>
+                <li>**The flashing process is performed on your computer** using the generated script (e.g., a Python or batch file). This web tool is no longer needed after the download.</li>
+                <li>Use that same <code>.bin</code> file for all nodes in your mesh.</li>
+            </ol>
+            <p style="margin-top: 15px;"><a href="directions.html#secure-mode" style="color: var(--secondary-color); font-weight: bold;">See the complete Secure Mode build and flash guide here.</a></p>
+          </div>
+          
       </div>
 
       <details class="advanced-section">
-        <summary>Advanced Options</summary>
+        <summary>Advanced Options (Experimental)</summary>
         <div class="advanced-content">
-            <h4>Flash from File</h4>
-            <p>
-                This allows you to flash a pre-compiled `.bin` file from your computer. This is useful for flashing a previously downloaded "Secure Mode" binary to new devices to ensure they all share the same key. This will ignore the mode selection above.
-            </p>
-            <input type="file" id="firmwareUpload" accept=".bin">
-            <button id="flashUploadedBtn" class="btn btn-advanced" disabled>Flash Uploaded BIN</button>
+                    
+            <div class="advanced-subsection">
+                <h4>Experimental: In-Browser Secure Flashing (Dev Only)</h4>
+                <p>
+                    This feature attempts to generate a key and patch firmware directly in your browser. It is for development and testing only and is <strong>not guaranteed to be secure or functional.</strong> The recommended path is the "Secure Mode" offline build process. <a href="directions.html#experimental-mode" style="color: var(--secondary-color);">See details on this experimental mode.</a>
+                </p>
+				<center>
+                <button id="initExperimentalBtn" class="btn btn-advanced" style="background-color: var(--secondary-color); color: var(--dark-text);">
+                    Initialize Experimental Flasher
+                </button>
+                
+                <div id="experimental-secure-controls" style="margin: 20px 0;">
+                    <button id="downloadSecureBtn" class="btn btn-secondary" disabled>
+                      Download Patched Secure Firmware
+                    </button>
+                    </center>
+                    <div class="psk-display-wrapper">
+                        <div id="sessionPskDisplay">
+                          Session PSK will be generated automatically...
+                        </div>
+                         <button id="clearPskBtn" title="Start New Secure Session (Clear Key)">
+                            &#x21BB; </button>
+                    </div>
+                </div>
+                
+                <div id="experimental-button-container" style="text-align: center; margin-top: 15px;">
+                    </div>
+            </div>
+            
         </div>
       </details>
       <div class="instructions">
         <h3>📋 Instructions</h3>
+        <p>For a full, detailed guide on all flashing procedures, please visit the <a href="directions.html" style="color: var(--secondary-color); font-weight: bold;">Advanced Flashing Directions page</a>.</p>
         <ol>
           <li>Connect your ESP32 to your computer via USB.</li>
-          <li>Select your flashing mode. For Secure Mode, a key is generated for your session automatically.</li>
-          <li>Click **"Flash Firmware"** and select the ESP32 port from the popup.</li>
+          <li>Select your flashing mode:
+            <ul>
+                <li><strong>Compatibility Mode:</strong> The "Flash Firmware" button will appear. Follow the instructions below.</li>
+                <li><strong>Secure Mode:</strong> Download the <code>mesh.zip</code> kit and follow the instructions to build and flash the firmware on your workstation. This web tool is **not** used for flashing in this mode.</li>
+            </ul>
+          </li>
+          <li>For **Compatibility Mode** (and Experimental Mode): Click the **Flash Firmware** button and select the ESP32 port from the popup.</li>
+          <li>For **Secure Mode**: Follow the instructions provided in the downloaded kit (<code>mesh.zip</code>) to build and flash the firmware on your computer.</li>
           <li>Wait for flashing to complete. </li>
           <li>Press RESET on your ESP32 after the flash is complete. </li>
-		  <li>If you have trouble connecting to the next device (if applicable) refresh the web page. If in secure mode, your session will be retained.</li>
+		  <li>If you have trouble connecting to the next device (if applicable) refresh the web page.</li>
         </ol>
       </div>
 
@@ -583,27 +616,7 @@
     <div class="log-content"><pre id="log">Ready to flash...</pre></div>
   </div>
 
-  <div class="modal-overlay" id="secureOverrideModal" aria-hidden="true">
-    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="secureOverrideTitle">
-      <h3 id="secureOverrideTitle">Enable Secure Mode?</h3>
-      <p>You attempted to select Secure Mode, but Secure Mode is currently disabled. How would you like to proceed?</p>
-      <ul style="color:var(--medium-text)">
-        <li><strong>Enable for this session:</strong> Immediately enable Secure Mode for this tab only (temporary). This is a development and test feature. Currently the only SECURE way to flash this is manually changing the PSK in code.</li>
-        <li><strong>Cancel:</strong> Stay in Compatibility Mode.</li>
-      </ul>
-      <div class="actions">
-        <button id="cancelOverrideBtn" class="btn btn-neutral">Cancel</button>
-        <button id="enableSessionBtn" class="btn btn-secondary">Enable for this session</button>
-      </div>
-    </div>
-  </div>
-
   <script>
-    // ---------------------------------------------
-    // SECURE MODE DISABLE FLAG: Set to 'false' to re-enable Secure Mode functionality for dev/test.
-    const DISABLE_SECURE_MODE = false;
-    // ---------------------------------------------
-
     const browserEl = document.getElementById('browser');
     const platformEl = document.getElementById('platform');
     const serialEl = document.getElementById('serial');
@@ -617,42 +630,25 @@
     const buttonContainer = document.getElementById('buttonContainer');
     
     // UI ELEMENTS
-    const secureModeControls = document.getElementById('secure-mode-controls');
     const compatibilityModeControls = document.getElementById('compatibility-mode-controls');
-    const sessionPskDisplay = document.getElementById('sessionPskDisplay');
-    const downloadSecureBtn = document.getElementById('downloadSecureBtn');
-    const clearPskBtn = document.getElementById('clearPskBtn');
+    const secureModeWorkflow = document.getElementById('secure-mode-workflow');
     const radioCompatibility = document.getElementById('radioCompatibility');
     const radioSecure = document.getElementById('radioSecure');
-    const secureModeDisabledMessage = document.getElementById('secure-mode-disabled-message'); 
-    const overrideSecureBtn = document.getElementById('overrideSecureBtn'); 
 
-    // Modal elements
-    const secureOverrideModal = document.getElementById('secureOverrideModal');
-    const enableSessionBtn = document.getElementById('enableSessionBtn');
-    // Removed: const enablePermanentBtn = document.getElementById('enablePermanentBtn');
-    const cancelOverrideBtn = document.getElementById('cancelOverrideBtn');
-
-    // NEW: ADVANCED UI ELEMENTS
-    const firmwareUpload = document.getElementById('firmwareUpload');
-    const flashUploadedBtn = document.getElementById('flashUploadedBtn');
-
-    // Use 'let' for the install button so it can be reassigned during a reset
-    let installButton;
+    // EXPERIMENTAL UI ELEMENTS
+    const initExperimentalBtn = document.getElementById('initExperimentalBtn');
+    const experimentalSecureControls = document.getElementById('experimental-secure-controls');
+    const experimentalPskDisplay = document.getElementById('sessionPskDisplay');
+    const experimentalDownloadSecureBtn = document.getElementById('downloadSecureBtn');
+    const experimentalClearPskBtn = document.getElementById('clearPskBtn');
+    const experimentalButtonContainer = document.getElementById('experimental-button-container');
 
     // SESSION/PERSISTENT VARIABLES
     let patchedFirmwareUrl = null;
-    let uploadedFileUrl = null; 
+    let uploadedFileUrl = null; // Stays for compatibility with the flash component/experimental mode
     let sessionPsk = sessionStorage.getItem('sessionPsk');
-
-    // Determine secure mode enabled state:
-    // - permanent flag in localStorage OR
-    // - temporary flag in sessionStorage (set when user chooses session-only override)
-    let isSecureModeEnabled = (localStorage.getItem('isSecureModeEnabled') === 'true') ||
-                              (sessionStorage.getItem('isSecureModeTemp') === 'true');
-
     let isResetting = false;
-
+    
     // Display system info
     browserEl.textContent = navigator.userAgent;
     platformEl.textContent = navigator.platform;
@@ -688,15 +684,13 @@
     });
     document.addEventListener('mouseup', () => { isResizing = false; });
 
-    // --- Secure Flashing Logic (kept for easy re-enable) ---
+    // --- Secure Flashing Logic (now for EXPERIMENTAL mode) ---
     const PSK_LENGTH = 16;
     const PATCH_MAGIC = new Uint8Array([ 0xDE, 0xAD, 0xBE, 0xEF ]);
     const DEFAULT_PSK = new Uint8Array([
       0x7C, 0xE3, 0x91, 0x2F, 0xA8, 0x5D, 0xB4, 0x69,
       0x3E, 0xC7, 0x14, 0xF2, 0x86, 0x0B, 0xD9, 0x4A
     ]);
-
-    // Concatenate them to create the *actual* search needle
     const searchNeedle = new Uint8Array(PATCH_MAGIC.length + DEFAULT_PSK.length);
     searchNeedle.set(PATCH_MAGIC, 0);
     searchNeedle.set(DEFAULT_PSK, PATCH_MAGIC.length);
@@ -719,14 +713,13 @@
     }
 
     async function prepareSecureFirmware() {
-      // If the whole feature is forcibly disabled, bail out.
-      if (DISABLE_SECURE_MODE && !isSecureModeEnabled) return;
-      const flashBtn = document.getElementById('flashBtn');
-      log('Preparing Secure Firmware for this session...');
+      // This function now targets the EXPERIMENTAL UI elements
+      const flashBtn = experimentalButtonContainer.querySelector('button');
+      log('Preparing Experimental Secure Firmware...');
       if(flashBtn) flashBtn.disabled = true;
-      downloadSecureBtn.disabled = true;
-      sessionPskDisplay.textContent = 'Generating key and patching firmware...';
-      sessionPskDisplay.style.color = 'var(--medium-text)';
+      experimentalDownloadSecureBtn.disabled = true;
+      experimentalPskDisplay.textContent = 'Generating key and patching firmware...';
+      experimentalPskDisplay.style.color = 'var(--medium-text)';
 
       if (patchedFirmwareUrl) {
         URL.revokeObjectURL(patchedFirmwareUrl);
@@ -743,18 +736,16 @@
 
         const obfuscatedPsk = '**************************' + sessionPsk.slice(-6);
         log('****************************************************************');
-        log(`🔒 Current Secure Session PSK: ${obfuscatedPsk}`);
-        log('   This key will be used for all devices flashed in this session.');
+        log(`🔒 Current Experimental Session PSK: ${obfuscatedPsk}`);
         log('****************************************************************');
-        sessionPskDisplay.textContent = `Session PSK: ${obfuscatedPsk}`;
-        sessionPskDisplay.style.color = 'var(--light-text)';
+        experimentalPskDisplay.textContent = `Session PSK: ${obfuscatedPsk}`;
+        experimentalPskDisplay.style.color = 'var(--light-text)';
 
-        // *** MODIFIED to add cache-buster ***
+        // We still fetch the *original* manifest to find the *original* binary to patch
         const manifest = await (await fetch('./manifest.json?t=' + Date.now())).json();
         const firmwarePart = manifest.builds[0].parts.find(part => part.path.includes("sketch_jun11a.ino.merged.bin"));
         if (!firmwarePart) throw new Error("Could not find firmware part in manifest.");
         
-        // *** MODIFIED to add cache-buster ***
         const response = await fetch(firmwarePart.path + '?t=' + Date.now());
         if (!response.ok) throw new Error(`Failed to fetch firmware: ${response.statusText}`);
         const firmwareData = new Uint8Array(await response.arrayBuffer());
@@ -777,98 +768,111 @@
         firmwareData.set(pskBytes, patchKeyOffset);
 
         const patchedBlob = new Blob([firmwareData], { type: 'application/octet-stream' });
-        patchedFirmwareUrl = URL.createObjectURL(patchedBlob);
         
-        log('✅ Secure firmware is generated and ready to be flashed.');
+        // Create a new File object named 'upload.bin' from the patched blob
+        const patchedFile = new File([patchedBlob], "upload.bin", { type: 'application/octet-stream' });
+        patchedFirmwareUrl = URL.createObjectURL(patchedFile);
+        log(`Patched firmware renamed in-memory to 'upload.bin' for manifest2.json`);
+        
+        log('✅ Experimental secure firmware is generated and ready.');
         if(flashBtn) flashBtn.disabled = false;
-        downloadSecureBtn.disabled = false;
-
-        // *** ADDED: Set manifest *after* blob is ready ***
-        // Now that the blob is ready, set the manifest on the component
-        // to wake it up and make it ready to flash.
-        if (installButton) {
-          installButton.manifest = './manifest.json?t=' + Date.now();
-        }
-        // *** END ADDED BLOCK ***
-
+        experimentalDownloadSecureBtn.disabled = false;
       } catch(e) {
-        log(`Error preparing secure firmware: ${e.message}`, 'error');
-        sessionPskDisplay.textContent = "Error! Check console.";
-        sessionPskDisplay.style.color = 'var(--error-color)';
+        log(`Error preparing experimental firmware: ${e.message}`, 'error');
+        experimentalPskDisplay.textContent = "Error! Check console.";
+        experimentalPskDisplay.style.color = 'var(--error-color)';
         if(flashBtn) flashBtn.disabled = true;
       }
     }
 
-    function createFlasherComponent() {
-      buttonContainer.innerHTML = '';
-      const newInstallButton = document.createElement('esp-web-install-button');
-      newInstallButton.patchManifest = patchManifestFn;
-      newInstallButton.addEventListener('state-changed', onStateChanged);
-      newInstallButton.addEventListener('error', onError);
+    /**
+     * Creates a new esp-web-install-button component in the specified container.
+     * @param {string} buttonText The text for the proxy button.
+     * @param {HTMLElement} containerEl The container to append the button to.
+     * @param {string} context The flash context ('compatibility', 'upload', 'experimental').
+     * @param {string} [className='btn'] The CSS class for the button.
+     * @returns {HTMLElement} The created esp-web-install-button element.
+     */
+    function createFlashButton(buttonText, containerEl, context, className = 'btn') {
+      containerEl.innerHTML = '';
+      
+      const installButton = document.createElement('esp-web-install-button');
+      installButton.patchManifest = patchManifestFn;
+      installButton.addEventListener('state-changed', onStateChanged);
+      installButton.addEventListener('error', onError);
+      
+      // Set the attribute on the *outer component* so patchManifestFn can read it
+      installButton.setAttribute('data-flash-context', context);
 
-      // *** MODIFIED LOGIC ***
-      const modeEl = document.querySelector('input[name="flashMode"]:checked');
-      const mode = modeEl ? modeEl.value : 'compatibility';
+      const buttonId = context === 'uploaded' ? 'uploadedFlashBtn' : 'flashBtn';
+      
+      // Inject the inner button HTML
+      installButton.innerHTML = `<button slot="activate" id="${buttonId}" class="${className}" data-flash-context="${context}">${buttonText}</button>`;
+      containerEl.appendChild(installButton);
 
-      // Only set the manifest immediately if in compatibility mode.
-      // This prevents the pre-fetch/cache in Secure Mode.
-      if (mode === 'compatibility') {
-        newInstallButton.manifest = './manifest.json?t=' + Date.now(); // Added cache-buster
-      }
-      // *** END MODIFIED LOGIC ***
+      // The button's original click listener is now only used to trigger the manifest load.
+      const proxyButton = installButton.querySelector('button');
+      if(proxyButton) {
+        proxyButton.addEventListener('click', () => {
+             log(`Starting flash with context: ${context}`);
+             
+             // Secure mode now uses the file select built into the component
+             const manifestPath = (context === 'experimental') 
+                ? './manifest2.json?t=' + Date.now() 
+                : './manifest.json?t=' + Date.now();
+             
+             log(`Loading manifest: ${manifestPath}`);
+             installButton.manifest = manifestPath;
 
-      newInstallButton.innerHTML = `<button slot="activate" id="flashBtn" class="btn">⚡ Flash Firmware</button>`;
-      buttonContainer.appendChild(newInstallButton);
-      installButton = newInstallButton;
-      isResetting = false;
-
-      if (document.querySelector('input[name="flashMode"]:checked') && document.querySelector('input[name="flashMode"]:checked').value === 'secure') {
-          installButton.querySelector('button').disabled = true;
-          log("Secure mode: Waiting for firmware patch...");
-      }
-    }
-
-    const patchManifestFn = (manifest) => {
-      // *** FIX: Create a deep copy of the manifest to avoid modifying the original object. ***
-      const manifestCopy = JSON.parse(JSON.stringify(manifest));
-      const firmwarePart = manifestCopy.builds[0].parts.find(part => part.path.includes("sketch_jun11a.ino.merged.bin"));
-
-      if (!firmwarePart) {
-          log('Could not find the default firmware binary in the manifest.', 'error');
-          throw new Error("Firmware part not found in manifest.");
+             // Only compatibility and experimental modes are active flash flows.
+             installButton.removeAttribute('data-file-select');
+        });
       }
       
-      // Check if we are in "upload from file" mode first
-      if (sessionStorage.getItem('uploadMode') === 'true') {
-        sessionStorage.removeItem('uploadMode'); // Clean up the flag
-        if (!uploadedFileUrl) {
-          log('No uploaded file is available to flash.', 'error');
-          throw new Error("Uploaded file not ready.");
-        }
-        log(`Flashing from user-uploaded file: ${firmwareUpload.files[0].name}`);
-        firmwarePart.path = uploadedFileUrl;
-        return manifestCopy;
-      }
+      isResetting = false;
+      return installButton;
+    }
 
-      // Original logic for radio buttons
-      const modeEl = document.querySelector('input[name="flashMode"]:checked');
-      const mode = modeEl ? modeEl.value : 'compatibility';
-      if (mode === 'compatibility') { 
-        log('Flashing in Compatibility Mode (using default PSK)');
-        // *** ADD cache-buster to compatibility mode path ***
-        firmwarePart.path = firmwarePart.path + '?t=' + Date.now();
-        return manifestCopy;
-      }
-      if (mode === 'secure') {
-        if (!patchedFirmwareUrl || !sessionPsk) {
-          log('Secure firmware has not been generated. Cannot flash.', 'error');
-          throw new Error("Secure firmware not ready.");
+
+    const patchManifestFn = (manifest, target) => {
+      const manifestCopy = JSON.parse(JSON.stringify(manifest));
+      
+      // Read the context from the `target` component, which now has the attribute
+      const context = target.getAttribute('data-flash-context') || 'compatibility';
+      
+      
+      if (context === 'experimental') {
+        // We are now loading manifest2.json, which expects 'upload.bin'
+        const firmwarePart = manifestCopy.builds[0].parts.find(part => part.path.includes("upload.bin"));
+        
+        if (!firmwarePart) {
+            log('Could not find "upload.bin" in the loaded manifest (expected manifest2.json).', 'error');
+            throw new Error("Firmware part 'upload.bin' not found.");
         }
+        if (!patchedFirmwareUrl || !sessionPsk) {
+            log('Experimental secure firmware has not been generated. Cannot flash.', 'error');
+            throw new Error("Experimental secure firmware not ready.");
+        }
+        
         const obfuscatedPsk = '**************************' + sessionPsk.slice(-6);
-        log(`Flashing in Secure Mode with session PSK: ${obfuscatedPsk}`);
+        log(`Flashing in Experimental Secure Mode with session PSK: ${obfuscatedPsk}`);
+        
+        // Point the 'upload.bin' part to our in-memory patched blob
         firmwarePart.path = patchedFirmwareUrl;
         return manifestCopy;
       }
+      
+      // Default: 'compatibility'
+      const firmwarePart = manifestCopy.builds[0].parts.find(part => part.path.includes("sketch_jun11a.ino.merged.bin"));
+      
+      if (!firmwarePart) {
+          log('Could not find "sketch_jun11a.ino.merged.bin" in the loaded manifest (expected manifest.json).', 'error');
+          throw new Error("Firmware part 'sketch_jun11a.ino.merged.bin' not found.");
+      }
+      
+      log('Flashing in Compatibility Mode (using default PSK)');
+      firmwarePart.path = firmwarePart.path + '?t=' + Date.now();
+      return manifestCopy;
     };
 
     const onStateChanged = (e) => {
@@ -882,9 +886,10 @@
       const isFinished = ['FINISHED', 'ERROR', 'DASHBOARD'].includes(state);
 
       if (isFinished) {
-        sessionStorage.removeItem('uploadMode'); 
         if (isResetting) return;
         isResetting = true;
+        
+        log('Flash flow finished. Tool is resetting...');
 
         if (state === 'FINISHED') {
           log('✅ Flash complete! Press RESET button on ESP32.', 'success');
@@ -897,11 +902,13 @@
            log('ℹ️ Operation cancelled or closed. Resetting tool...');
         }
         
+        // Find the active dialog and close it
+        const dialog = document.querySelector("ewt-dialog");
+        if (dialog) { dialog.close(); }
+        
         setTimeout(() => {
-          const dialog = document.querySelector("ewt-dialog");
-          if (dialog) { dialog.close(); }
-          createFlasherComponent();
-          initFlashMode();
+          // Re-initialize the UI.
+          initFlashMode(); 
         }, 1500);
       }
     };
@@ -912,264 +919,137 @@
     };
 
     function initFlashMode() {
-        // Update override button based on persistent flag
-        if (localStorage.getItem('isSecureModeEnabled') === 'true') {
-            overrideSecureBtn.textContent = 'Disable Secure Mode and Reload';
-            overrideSecureBtn.classList.remove('btn-secondary');
-            overrideSecureBtn.style.backgroundColor = '#444'; // neutral color
-        } else {
-            overrideSecureBtn.textContent = 'Enable Secure Mode and Reload';
-            overrideSecureBtn.classList.add('btn-secondary');
-            overrideSecureBtn.style.backgroundColor = ''; // revert
-        }
-
-        // If a temporary session override exists, show that in the UI too
-        const isTemp = sessionStorage.getItem('isSecureModeTemp') === 'true';
-        if (isTemp && !localStorage.getItem('isSecureModeEnabled')) {
-            // indicate that secure mode is active for this session
-            overrideSecureBtn.textContent = 'Secure Mode active for this session';
-            overrideSecureBtn.classList.remove('btn-secondary');
-            overrideSecureBtn.style.backgroundColor = '#2a7a2a';
-        }
-
-        // IMPORTANT: keep the Secure radio interactive so we can intercept clicks and show modal.
-        // Do not disable the radio element; we will intercept activations to show the override flow.
-        radioSecure.disabled = false;
-
-        // If secure mode is not enabled (persistently or session), show message and default to compatibility UI
-        if (!isSecureModeEnabled) {
-            radioCompatibility.checked = true; // Default to compatibility
-            secureModeControls.style.display = 'none';
-            secureModeDisabledMessage.style.display = 'block'; // Show the message with the toggle button
-            compatibilityModeControls.style.display = 'block'; // Show compatibility controls
-            
-            log('Secure Mode is currently disabled. Use the toggle button or choose a session override to enable it.', 'info');
-            const flashBtn = document.getElementById('flashBtn');
-            if (flashBtn) flashBtn.disabled = false; // Compatibility mode is ready
-            return;
-        }
-
-        // If isSecureModeEnabled is true, proceed to normal state management
-        radioSecure.disabled = false; // Ensure radio is enabled
-        secureModeDisabledMessage.style.display = 'none'; // Hide disabled message
-
-        let savedMode = sessionStorage.getItem('flashMode') || 'compatibility';
+        const mode = radioCompatibility.checked ? 'compatibility' : 'secure';
         
-        if (savedMode === 'secure') {
-            radioSecure.checked = true;
-            secureModeControls.style.display = 'block';
-            compatibilityModeControls.style.display = 'none';
-        } else {
-            radioCompatibility.checked = true;
-            secureModeControls.style.display = 'none';
+        // Reset experimental button state
+        initExperimentalBtn.disabled = false;
+        experimentalButtonContainer.innerHTML = ''; // Clear old experimental button
+        experimentalDownloadSecureBtn.disabled = true;
+        if (!sessionPsk) {
+            experimentalPskDisplay.textContent = 'Session PSK will be generated automatically...';
+            experimentalPskDisplay.style.color = 'var(--medium-text)';
+        }
+
+        if (mode === 'compatibility') {
+            buttonContainer.style.display = 'block';
             compatibilityModeControls.style.display = 'block';
-        }
-        
-        const flashBtn = document.getElementById('flashBtn');
-        if (savedMode === 'secure') {
-            if(flashBtn) flashBtn.disabled = true;
-            prepareSecureFirmware();
-        } else {
-            if(flashBtn) flashBtn.disabled = false;
+            secureModeWorkflow.style.display = 'none';
+
+            // Create the main flasher button for compatibility mode
+            createFlashButton('⚡ Flash Firmware', buttonContainer, 'compatibility');
+
+        } else { // 'secure' mode (Download Only)
+            buttonContainer.style.display = 'none';
+            compatibilityModeControls.style.display = 'none';
+            secureModeWorkflow.style.display = 'block';
+            
+            // NO FLASH BUTTON IS CREATED HERE
         }
     }
     
     // --- UI Event Listeners ---
-
-    // Toggle Button Listener - FLIPS PERSISTENT STATE AND RELOADS PAGE
-    overrideSecureBtn.addEventListener('click', () => {
-        // Flip persistent state
-        const currentlyPersistent = localStorage.getItem('isSecureModeEnabled') === 'true';
-        const newState = !currentlyPersistent;
-        localStorage.setItem('isSecureModeEnabled', newState.toString());
-        
-        // Remove temporary session override if it exists, as the persistent flag is now active.
-        sessionStorage.removeItem('isSecureModeTemp');
-
-        log(`Toggled persistent Secure Mode to: ${newState ? 'Enabled' : 'Disabled'}. Reloading page...`, 'info');
-        window.location.reload();
-    });
-
-    // Modal control helpers
-    function showOverrideModal() {
-        secureOverrideModal.classList.add('show');
-        secureOverrideModal.setAttribute('aria-hidden', 'false');
-    }
-    function hideOverrideModal() {
-        secureOverrideModal.classList.remove('show');
-        secureOverrideModal.setAttribute('aria-hidden', 'true');
-    }
-
-    enableSessionBtn.addEventListener('click', () => {
-        // Enable secure mode for this session only (no reload).
-        sessionStorage.setItem('isSecureModeTemp', 'true');
-        isSecureModeEnabled = true;
-        hideOverrideModal();
-        log('Secure Mode enabled for this session (temporary). Initializing secure mode...', 'info');
-        initFlashMode();
-        // If user already selected secure radio, ensure UI shows secure mode controls
-        sessionStorage.setItem('flashMode', 'secure');
-        radioSecure.checked = true;
-        secureModeControls.style.display = 'block';
-        compatibilityModeControls.style.display = 'none';
-        
-        // *** MODIFIED: Manually call component recreation and secure prep ***
-        log('Mode changed. Re-initializing flasher component...');
-        createFlasherComponent();
-        const newFlashBtn = document.getElementById('flashBtn');
-        if (newFlashBtn) newFlashBtn.disabled = true;
-        prepareSecureFirmware();
-    });
-
-    // Removed: enablePermanentBtn.addEventListener('click', ...)
-
-    cancelOverrideBtn.addEventListener('click', () => {
-        hideOverrideModal();
-        // Ensure compatibility remains selected
-        radioCompatibility.checked = true;
-        sessionStorage.setItem('flashMode', 'compatibility');
-        log('Secure Mode selection cancelled. Staying in Compatibility Mode.', 'info');
-    });
-
-    // Intercept mouse/keyboard activation of Secure radio so we can show modal
-    radioSecure.addEventListener('mousedown', (e) => {
-        if (!isSecureModeEnabled) {
-            e.preventDefault(); // Prevent the radio from being selected by mouse
-            log('Intercepted Secure radio click - showing override modal.', 'info');
-            showOverrideModal();
-        }
-    });
-    // keyboard accessibility: intercept space/enter
-    radioSecure.addEventListener('keydown', (e) => {
-        if (!isSecureModeEnabled && (e.key === ' ' || e.key === 'Enter')) {
-            e.preventDefault();
-            log('Intercepted Secure radio keyboard activation - showing override modal.', 'info');
-            showOverrideModal();
-        }
-    });
-
-    // *** MODIFIED: This listener now recreates the component on change ***
+    
+    // Main radio button listener
     document.querySelectorAll('input[name="flashMode"]').forEach(radio => {
       radio.addEventListener('change', (e) => {
-        const mode = e.target.value;
-
-        if (mode === 'secure' && !isSecureModeEnabled) {
-            // do not allow immediate selection; prompt user for override choices
-            radioCompatibility.checked = true; // keep compatibility selected while user decides
-            log('Secure Mode is currently disabled. Prompting for override options...', 'info');
-            showOverrideModal();
-            // keep session storage as compatibility for now
-            sessionStorage.setItem('flashMode', 'compatibility');
-            return;
-        }
-
-        sessionStorage.setItem('flashMode', mode);
-        const isSecureMode = mode === 'secure';
-
-        secureModeControls.style.display = isSecureMode ? 'block' : 'none';
-        compatibilityModeControls.style.display = isSecureMode ? 'none' : 'block';
-        secureModeDisabledMessage.style.display = 'none'; // Ensure message is hidden if secure mode is enabled
-
-        // *** ADDED: Re-create the flasher component to bust its internal cache ***
-        log('Mode changed. Re-initializing flasher component...');
-        createFlasherComponent(); 
-        // *** END ADDED BLOCK ***
-
-        // Now, get the *new* button and apply logic
-        const newFlashBtn = document.getElementById('flashBtn');
-        if (isSecureMode) {
-          if(newFlashBtn) newFlashBtn.disabled = true; // Button is disabled by default in createFlasherComponent
-          prepareSecureFirmware(); // This will create the blob and re-enable the button
-        } else if (newFlashBtn) {
-          newFlashBtn.disabled = false;
-        }
+        log('Mode changed. Re-initializing UI...');
+        initFlashMode();
       });
     });
 
-    downloadSecureBtn.addEventListener('click', () => {
+    // --- Experimental (Advanced) Section Listeners ---
+
+    initExperimentalBtn.addEventListener('click', () => {
+        log('Initializing experimental secure flasher...');
+        // Create the flasher component in the experimental container
+        const installButton = createFlashButton('⚡ Flash Experimental Secure Firmware', experimentalButtonContainer, 'experimental');
+        
+        // Find the inner button and disable it temporarily
+        const experimentalFlashBtn = installButton.querySelector('button');
+        if (experimentalFlashBtn) {
+           experimentalFlashBtn.disabled = true;
+        }
+        
+        // Start the firmware patching
+        prepareSecureFirmware(); // This will enable the button when ready
+        
+        initExperimentalBtn.disabled = true; // Only init once
+    });
+
+    experimentalDownloadSecureBtn.addEventListener('click', () => {
         if (!patchedFirmwareUrl || !sessionPsk) {
             log('Secure firmware not available for download.', 'error');
             return;
         }
         const a = document.createElement('a');
         a.href = patchedFirmwareUrl;
-        a.download = `secure_firmware_${sessionPsk.slice(-6)}.bin`;
+        // The file is already named 'upload.bin' in memory, but we can name the download
+        // to be more descriptive.
+        a.download = `experimental_secure_firmware_${sessionPsk.slice(-6)}.bin`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         log(`Downloading secure firmware: ${a.download}`);
     });
 
-    clearPskBtn.addEventListener('click', () => {
-        if (!isSecureModeEnabled) return; // Guard 
-        if (!confirm('Are you sure you want to clear the current session key? This will require you to re-flash ALL your devices with the new key.')) {
+    experimentalClearPskBtn.addEventListener('click', () => {
+        if (!confirm('Are you sure you want to clear the current experimental session key?')) {
             return;
         }
         sessionStorage.removeItem('sessionPsk');
         sessionPsk = null; 
-        patchedFirmwareUrl = null; 
-        log('Security key cleared. A new key will be generated immediately.');
-        sessionPskDisplay.textContent = 'Session PSK cleared. Generating new key...';
-        sessionPskDisplay.style.color = 'var(--medium-text)';
-        downloadSecureBtn.disabled = true;
-        const flashBtn = document.getElementById('flashBtn');
-        if (document.querySelector('input[name="flashMode"]:checked').value === 'secure') {
-            if(flashBtn) flashBtn.disabled = true;
-            prepareSecureFirmware();
+        
+        // Also revoke the old blob URL
+        if (patchedFirmwareUrl) {
+            URL.revokeObjectURL(patchedFirmwareUrl);
+            patchedFirmwareUrl = null; 
         }
-    });
 
-    // NEW: Event listeners for advanced upload functionality
-    firmwareUpload.addEventListener('change', () => {
-        if (firmwareUpload.files.length > 0) {
-            const file = firmwareUpload.files[0];
-            if (uploadedFileUrl) {
-                URL.revokeObjectURL(uploadedFileUrl); // Clean up previous blob URL
+        log('Experimental security key cleared.');
+        
+        // Re-run the init process if the button has already been pressed
+        if (initExperimentalBtn.disabled) {
+            log('Re-initializing experimental flasher with new key...');
+            const installButton = experimentalButtonContainer.querySelector('esp-web-install-button');
+            if (installButton) {
+                const innerButton = installButton.querySelector('button');
+                if (innerButton) innerButton.disabled = true;
             }
-            uploadedFileUrl = URL.createObjectURL(file);
-            flashUploadedBtn.disabled = false;
-            log(`Selected file for upload: ${file.name}`);
+            experimentalDownloadSecureBtn.disabled = true;
+            prepareSecureFirmware();
         } else {
-            uploadedFileUrl = null;
-            flashUploadedBtn.disabled = true;
+             experimentalPskDisplay.textContent = 'Session PSK cleared.';
+             experimentalPskDisplay.style.color = 'var(--medium-text)';
         }
     });
 
-    flashUploadedBtn.addEventListener('click', () => {
-        if (!uploadedFileUrl) {
-            alert('Please select a .bin file to flash first.');
-            return;
-        }
-        // Set a flag to tell the patcher function which mode we're in
-        sessionStorage.setItem('uploadMode', 'true');
-        // Trigger the main flasher button's click event
-        if (installButton) {
-            
-            // *** MODIFIED to add cache-buster ***
-            installButton.manifest = './manifest.json?t=' + Date.now();
-            
-            installButton.querySelector('button').click();
-        } else {
-            log('Flasher component not ready.', 'error');
-        }
-    });
 
-    // *** MODIFIED: Added cache-busters to initial setup ***
+    // --- Initial Page Load ---
     (async () => {
       try {
-        const cacheBust = '?t=' + Date.now(); // Define cache-buster
-        const manifestRes = await fetch('./manifest.json' + cacheBust); // MODIFIED
+        const cacheBust = '?t=' + Date.now();
+        const manifestRes = await fetch('./manifest.json' + cacheBust);
         if (!manifestRes.ok) throw new Error(`manifest.json HTTP ${manifestRes.status}`);
         log('manifest.json found');
-        const firmwareRes = await fetch('./sketch_jun11a.ino.merged.bin' + cacheBust, { method: 'HEAD' }); // MODIFIED
+
+        // Also check for manifest2.json
+        const manifest2Res = await fetch('./manifest2.json' + cacheBust);
+        if (!manifest2Res.ok) throw new Error(`manifest2.json HTTP ${manifest2Res.status}`);
+        log('manifest2.json found');
+
+        const firmwareRes = await fetch('./sketch_jun11a.ino.merged.bin' + cacheBust, { method: 'HEAD' });
         if (!firmwareRes.ok) throw new Error(`sketch_jun11a.ino.merged.bin HTTP ${firmwareRes.status}`);
         log('sketch_jun11a.ino.merged.bin found');
       } catch (e) {
         log(e.message, 'error');
+        log('CRITICAL ERROR: A required file (manifest.json, manifest2.json, or the .bin) is missing.', 'error');
       }
-      createFlasherComponent();
+      
+      // Set default checked state
+      radioCompatibility.checked = true;
+      // Initialize the UI based on default state
       initFlashMode();
-      log('Ready to flash. Select a mode and click the button to begin.');
+      log('Ready to flash. Select a mode to begin.');
     })();
 
   </script>
