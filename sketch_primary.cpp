@@ -71,7 +71,7 @@ const char* CMD_PUBLIC_ON = "CMD::PUBLIC_ON";
 const char* CMD_PUBLIC_OFF = "CMD::PUBLIC_OFF";
 
 typedef struct __attribute__((packed)) {
-  uint32_t messageID;
+  uint64_t messageID; // --- MODIFIED: Was uint32_t, changed to uint64_t to prevent nonce collision ---
   uint8_t originalSenderMac[6];
   uint8_t ttl;
   uint8_t messageType;
@@ -203,12 +203,14 @@ bool useSessionKey = false; // Volatile
 
 // --- START: AES-CTR Encryption/Decryption ---
 // Helper function for AES-CTR encryption/decryption.
-void aesCtrCrypt(uint8_t* data, size_t dataLen, uint32_t messageID, const uint8_t* mac, const uint8_t* key) {
+// --- MODIFIED: Changed messageID to uint64_t to prevent nonce collision ---
+void aesCtrCrypt(uint8_t* data, size_t dataLen, uint64_t messageID, const uint8_t* mac, const uint8_t* key) {
     mbedtls_aes_context aes;
     mbedtls_aes_init(&aes);
     mbedtls_aes_setkey_enc(&aes, key, 128);
 
     unsigned char nonce_counter[16] = {0};
+    // --- MODIFIED: This now copies 8 bytes for the messageID, creating a 14-byte (112-bit) nonce ---
     memcpy(nonce_counter, &messageID, sizeof(messageID));
     memcpy(nonce_counter + sizeof(messageID), mac, 6);
 
@@ -220,12 +222,14 @@ void aesCtrCrypt(uint8_t* data, size_t dataLen, uint32_t messageID, const uint8_
 }
 
 // Wrapper for encryption, passes the specified key.
-void aesCtrEncrypt(uint8_t* data, size_t dataLen, uint32_t messageID, const uint8_t* mac, const uint8_t* key) {
+// --- MODIFIED: Changed messageID to uint64_t ---
+void aesCtrEncrypt(uint8_t* data, size_t dataLen, uint64_t messageID, const uint8_t* mac, const uint8_t* key) {
     aesCtrCrypt(data, dataLen, messageID, mac, key);
 }
 
 // Wrapper for decryption, passes the specified key.
-void aesCtrDecrypt(uint8_t* data, size_t dataLen, uint32_t messageID, const uint8_t* mac, const uint8_t* key) {
+// --- MODIFIED: Changed messageID to uint64_t ---
+void aesCtrDecrypt(uint8_t* data, size_t dataLen, uint64_t messageID, const uint8_t* mac, const uint8_t* key) {
     aesCtrCrypt(data, dataLen, messageID, mac, key);
 }
 // --- END: AES-CTR Encryption/Decryption ---
@@ -332,7 +336,7 @@ void generateHMAC(const esp_now_message_t& msg, const char* plaintext_payload, c
 }
 
 struct SeenMessage {
-  uint32_t messageID;
+  uint64_t messageID; // --- MODIFIED: Was uint32_t ---
   uint8_t originalSenderMac[6];
   unsigned long timestamp;
   esp_now_message_t messageData; // Stores the full message data (encrypted) for re-broadcasting
@@ -356,7 +360,7 @@ typedef struct {
 // Struct for logging security events to NVS from the main loop
 typedef struct {
     uint8_t senderMac[6];
-    uint32_t messageID;
+    uint64_t messageID; // --- MODIFIED: Was uint32_t ---
     int type; // e.g., 0 for hash failure
 } NvsQueueItem;
 
@@ -472,7 +476,8 @@ bool isOrganizerSessionValid(const String& token) {
   return token == organizerSessionToken;
 }
 
-bool isMessageSeen(uint32_t id, const uint8_t* mac) {
+// --- MODIFIED: Changed id to uint64_t ---
+bool isMessageSeen(uint64_t id, const uint8_t* mac) {
   portENTER_CRITICAL(&seenMessagesMutex);
   bool found = false;
   for (const auto& msg : seenMessages) {
@@ -485,7 +490,8 @@ bool isMessageSeen(uint32_t id, const uint8_t* mac) {
   return found;
 }
 
-void addOrUpdateMessageToSeen(uint32_t id, const uint8_t* mac, const esp_now_message_t& msgData) {
+// --- MODIFIED: Changed id to uint64_t ---
+void addOrUpdateMessageToSeen(uint64_t id, const uint8_t* mac, const esp_now_message_t& msgData) {
   portENTER_CRITICAL(&seenMessagesMutex);
   unsigned long currentTime = millis();
   bool updated = false;
@@ -570,6 +576,7 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
   if (useSessionKey && qMsg.messageData.messageType != MSG_TYPE_PASSWORD_UPDATE) {
       keyToUse = sessionKey;
   }
+  // --- MODIFIED: Pass uint64_t messageID to decrypt ---
   aesCtrDecrypt((uint8_t*)qMsg.messageData.content, MAX_MESSAGE_CONTENT_LEN, qMsg.messageData.messageID, qMsg.messageData.originalSenderMac, keyToUse);
   qMsg.messageData.content[MAX_MESSAGE_CONTENT_LEN - 1] = '\0'; // Ensure null termination for safety
 
@@ -601,7 +608,7 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
       // HMAC mismatch, queue for logging in main loop.
       NvsQueueItem nvsItem;
       memcpy(nvsItem.senderMac, recvInfo->src_addr, 6);
-      nvsItem.messageID = qMsg.messageData.messageID;
+      nvsItem.messageID = qMsg.messageData.messageID; // --- MODIFIED: Pass uint64_t ---
       nvsItem.type = 0; // 0 for hash/HMAC failure
       xQueueSendFromISR(nvsQueue, &nvsItem, 0);
       return; // Drop the message
@@ -661,7 +668,9 @@ void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len,
 
   esp_now_message_t newMessage;
   memset(&newMessage, 0, sizeof(newMessage));
-  newMessage.messageID = esp_random();
+  // --- MODIFIED: Generate a 64-bit random ID ---
+  uint64_t random_id = (uint64_t)esp_random() << 32 | esp_random();
+  newMessage.messageID = random_id;
   memcpy(newMessage.originalSenderMac, ourMacBytes, 6);
   newMessage.ttl = MAX_TTL_HOPS;
   newMessage.messageType = type;
@@ -695,11 +704,12 @@ void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len,
   // --- END: HMAC Logic ---
 
   // Encrypt the entire content buffer [HMAC | Payload]
+  // --- MODIFIED: Pass uint64_t messageID to encrypt ---
   aesCtrEncrypt((uint8_t*)newMessage.content, MAX_MESSAGE_CONTENT_LEN, newMessage.messageID, newMessage.originalSenderMac, keyToUse);
 
   if (targetMac != nullptr) {
       esp_now_send(targetMac, (uint8_t*)&newMessage, sizeof(esp_now_message_t));
-      if(VERBOSE_MODE) Serial.printf("Sent unicast message (Type: %d, ID: %u) to %02X:%02X:%02X:%02X:%02X:%02X\n",
+      if(VERBOSE_MODE) Serial.printf("Sent unicast message (Type: %d, ID: %llu) to %02X:%02X:%02X:%02X:%02X:%02X\n",
                     type, newMessage.messageID, targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5]);
   } else {
       sendToAllPeers(newMessage);
@@ -712,11 +722,13 @@ void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len,
   }
   
   // Pass the already-encrypted message to the cache.
+  // --- MODIFIED: Pass uint64_t messageID ---
   addOrUpdateMessageToSeen(newMessage.messageID, newMessage.originalSenderMac, newMessage);
 
   // Add to local display log immediately for originating node (must decrypt a copy first)
   portENTER_CRITICAL(&localDisplayLogMutex);
   esp_now_message_t displayMessage = newMessage;
+  // --- MODIFIED: Pass uint64_t messageID to decrypt ---
   aesCtrDecrypt((uint8_t*)displayMessage.content, MAX_MESSAGE_CONTENT_LEN, displayMessage.messageID, displayMessage.originalSenderMac, keyToUse);
   
   // Extract payload from [HMAC | payload] for local display
@@ -743,7 +755,8 @@ void manageLocalDisplayLog() {
     });
 
     std::vector<LocalDisplayEntry> newLocalDisplayLog;
-    std::set<std::pair<uint32_t, String>> addedMessageKeys;
+    // --- MODIFIED: Use uint64_t for messageID in the set ---
+    std::set<std::pair<uint64_t, String>> addedMessageKeys;
 
     // 2. Add the most recent organizer messages first
     int organizerCount = 0;
@@ -1096,6 +1109,7 @@ void loop() {
         continue;
     }
 
+    // --- MODIFIED: Pass uint64_t messageID ---
     bool wasAlreadySeen = isMessageSeen(incomingMessage.messageID, incomingMessage.originalSenderMac);
     bool skipDisplayLog = false;
 
@@ -1231,7 +1245,9 @@ void loop() {
     memcpy(encryptedForCache.content + HMAC_LEN, payload_for_hmac, strlen(payload_for_hmac) + 1);
 
     // Encrypt the message content before caching
+    // --- MODIFIED: Pass uint64_t messageID ---
     aesCtrEncrypt((uint8_t*)encryptedForCache.content, MAX_MESSAGE_CONTENT_LEN, encryptedForCache.messageID, encryptedForCache.originalSenderMac, keyToUseForCache);
+    // --- MODIFIED: Pass uint64_t messageID ---
     addOrUpdateMessageToSeen(encryptedForCache.messageID, encryptedForCache.originalSenderMac, encryptedForCache);
 
     if (!wasAlreadySeen) {
