@@ -293,7 +293,11 @@ void deriveAndSetSessionKey(const String& password) {
     memcpy(sessionKey, hash, 16); // Use first 16 bytes of the *final* hash as the AES key
     useSessionKey = true;
     passwordChangeLocked = true;
-    hashedOrganizerPassword = simpleHash(password); // For web UI authentication
+    // --- START: MODIFICATION (Logic from new 3.txt) ---
+    // This function is now ONLY responsible for the session key.
+    // The simple hash for login is set explicitly by the calling functions.
+    // hashedOrganizerPassword = simpleHash(password); // This line removed
+    // --- END: MODIFICATION ---
     if(VERBOSE_MODE) Serial.println("Volatile session key derived from password (stretched).");
 }
 
@@ -1149,9 +1153,11 @@ void loop() {
 
         // This core logic should only run the *first* time we see this password update
         if (!wasAlreadySeen) {
+            // --- START: MODIFICATION (Logic from new 3.txt) ---
             // always update web UI login password
             hashedOrganizerPassword = simpleHash(incomingPass);
             passwordChangeLocked    = true;
+            // --- END: MODIFICATION ---
 
             // Compatibility mode nodes need to derive the new key.
             if (isUsingDefaultPsk) {
@@ -1608,12 +1614,12 @@ void loop() {
               }
               newPasswordParam.replace('+', ' '); String decodedNewPassword = "";
               for (int i = 0; i < newPasswordParam.length(); i++) {
-                if (newPasswordParam.charAt(i) == '%' && (i + 2) < newPasswordParam.length()) { decodedNewPassword += (char)strtol((newPasswordParam.substring(i + 1, i + 3)).c_str(), NULL, 16); i += 2; }
+                if (newPasswordParam.charAt(i) == '%' && (i + 2) < newPasswordParam.length()) { decodedNewPassword += (char)strtol((messageParam.substring(i + 1, i + 3)).c_str(), NULL, 16); i += 2; }
                 else { decodedNewPassword += newPasswordParam.charAt(i); }
               }
               confirmNewPasswordParam.replace('+', ' '); String decodedConfirmNewPassword = "";
               for (int i = 0; i < confirmNewPasswordParam.length(); i++) {
-                if (confirmNewPasswordParam.charAt(i) == '%' && (i + 2) < confirmNewPasswordParam.length()) { decodedConfirmNewPassword += (char)strtol((confirmNewPasswordParam.substring(i + 1, i + 3)).c_str(), NULL, 16); i += 2; }
+                if (confirmNewPasswordParam.charAt(i) == '%' && (i + 2) < confirmNewPasswordParam.length()) { decodedConfirmNewPassword += (char)strtol((messageParam.substring(i + 1, i + 3)).c_str(), NULL, 16); i += 2; }
                 else { decodedConfirmNewPassword += confirmNewPasswordParam.charAt(i); }
               }
 
@@ -1711,24 +1717,25 @@ void loop() {
                       } else if (decodedNewPassword != decodedConfirmNewPassword) {
                           webFeedbackMessage = "<p class='feedback' style='color:red;'>New passwords do not match. Please try again.</p>";
                       } else {
-                          // The action depends on the mode detected at boot.
+                          // --- START: MODIFICATION (Logic from new 3.txt) ---
+                          // 1. Set the hash for web login (simple hash)
+                          hashedOrganizerPassword = simpleHash(decodedNewPassword);
+                          passwordChangeLocked = true;
+                          
+                          // 2. Set the key for mesh encryption (stretched key)
                           if (isUsingDefaultPsk) {
-                              // Compatibility Mode: Derive a new key and broadcast it.
+                              // Compatibility Mode: Derive the stretched session key
                               if(VERBOSE_MODE) Serial.println("Setting password in Compatibility Mode. Deriving and broadcasting new session key.");
                               deriveAndSetSessionKey(decodedNewPassword);
-                              createAndSendMessage(decodedNewPassword.c_str(), decodedNewPassword.length(), MSG_TYPE_PASSWORD_UPDATE);
                           } else {
-    // Secure Flash Mode: Only update the web UI login password. Do NOT change the mesh key.
-    if(VERBOSE_MODE) Serial.println("Setting password in Secure Mode. Updating web UI login hash only.");
-    hashedOrganizerPassword = simpleHash(decodedNewPassword);
-    passwordChangeLocked = true; // Lock from further changes.
-
-    // Broadcast the new organizer password so other secure nodes update their web-login too.
-    // MSG_TYPE_PASSWORD_UPDATE messages are encrypted with the flashed PSK (PRE_SHARED_KEY+4),
-    // so plaintext here is transported safely to other nodes sharing the same flashed key.
-    createAndSendMessage(decodedNewPassword.c_str(), decodedNewPassword.length(), MSG_TYPE_PASSWORD_UPDATE);
-
+                              // Secure Flash Mode: Only update web UI hash.
+                              if(VERBOSE_MODE) Serial.println("Setting password in Secure Flash Mode. Web UI hash updated only.");
                           }
+                      
+                          // 3. Broadcast the new organizer password
+                          createAndSendMessage(decodedNewPassword.c_str(), decodedNewPassword.length(), MSG_TYPE_PASSWORD_UPDATE);
+                          // --- END: MODIFICATION ---
+                          
                           webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer password updated successfully!</p>";
                           loginAttempts = 0;
                           lockoutTime = 0;
