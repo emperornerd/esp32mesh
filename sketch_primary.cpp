@@ -30,7 +30,7 @@ bool displayActive = false;
 
 // --- Debugging & Verbosity ---
 // WARNING: Set to false for production. Logs sensitive info (hashes, etc.) to Serial.
-#define VERBOSE_MODE true 
+#define VERBOSE_MODE false 
 
 // --- Network Configuration Constants ---
 const int WIFI_CHANNEL = 1;
