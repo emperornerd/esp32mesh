@@ -29,7 +29,8 @@ bool displayActive = false;
 #endif
 
 // --- Debugging & Verbosity ---
-#define VERBOSE_MODE false // Set to true for detailed serial output, false for quiet operation
+// WARNING: Set to false for production. Logs sensitive info (hashes, etc.) to Serial.
+#define VERBOSE_MODE true 
 
 // --- Network Configuration Constants ---
 const int WIFI_CHANNEL = 1;
@@ -293,11 +294,7 @@ void deriveAndSetSessionKey(const String& password) {
     memcpy(sessionKey, hash, 16); // Use first 16 bytes of the *final* hash as the AES key
     useSessionKey = true;
     passwordChangeLocked = true;
-    // --- START: MODIFICATION (Logic from new 3.txt) ---
-    // This function is now ONLY responsible for the session key.
-    // The simple hash for login is set explicitly by the calling functions.
-    // hashedOrganizerPassword = simpleHash(password); // This line removed
-    // --- END: MODIFICATION ---
+    hashedOrganizerPassword = simpleHash(password); // For web UI authentication
     if(VERBOSE_MODE) Serial.println("Volatile session key derived from password (stretched).");
 }
 
@@ -1153,11 +1150,9 @@ void loop() {
 
         // This core logic should only run the *first* time we see this password update
         if (!wasAlreadySeen) {
-            // --- START: MODIFICATION (Logic from new 3.txt) ---
             // always update web UI login password
             hashedOrganizerPassword = simpleHash(incomingPass);
             passwordChangeLocked    = true;
-            // --- END: MODIFICATION ---
 
             // Compatibility mode nodes need to derive the new key.
             if (isUsingDefaultPsk) {
@@ -1568,19 +1563,25 @@ void loop() {
             }
 
             if (isPost) {
-              String messageParam = "", passwordParam = "", urgentParam = "", actionParam = "", newPasswordParam = "", confirmNewPasswordParam = "";
+              // --- MODIFICATION START: Add passwordHashParam, remove passwordParam ---
+              String messageParam = "", passwordHashParam = "", urgentParam = "", actionParam = "", newPasswordParam = "", confirmNewPasswordParam = "";
+              // --- MODIFICATION END ---
+              
               int messageStart = postBody.indexOf("message=");
               if (messageStart != -1) {
                 int messageEnd = postBody.indexOf('&', messageStart);
                 if (messageEnd == -1) messageEnd = postBody.length();
                 messageParam = postBody.substring(messageStart + 8, messageEnd);
               }
-              int passwordStart = postBody.indexOf("password_plaintext_client=");
-              if (passwordStart != -1) {
-                int passwordEnd = postBody.indexOf('&', passwordStart);
-                if (passwordEnd == -1) passwordEnd = postBody.length();
-                passwordParam = postBody.substring(passwordStart + 26, passwordEnd);
+              // --- MODIFICATION START: Read password_hash_client instead of password_plaintext_client ---
+              int passwordHashStart = postBody.indexOf("password_hash_client=");
+              if (passwordHashStart != -1) {
+                int passwordHashEnd = postBody.indexOf('&', passwordHashStart);
+                if (passwordHashEnd == -1) passwordHashEnd = postBody.length();
+                passwordHashParam = postBody.substring(passwordHashStart + 21, passwordHashEnd);
               }
+              // --- MODIFICATION END ---
+              
               if (postBody.indexOf("urgent=on") != -1) { urgentParam = "on"; }
               int actionStart = postBody.indexOf("action=");
               if (actionStart != -1) {
@@ -1607,19 +1608,23 @@ void loop() {
                 if (messageParam.charAt(i) == '%' && (i + 2) < messageParam.length()) { decodedMessage += (char)strtol((messageParam.substring(i + 1, i + 3)).c_str(), NULL, 16); i += 2; }
                 else { decodedMessage += messageParam.charAt(i); }
               }
-              passwordParam.replace('+', ' '); String decodedPassword = "";
-              for (int i = 0; i < passwordParam.length(); i++) {
-                if (passwordParam.charAt(i) == '%' && (i + 2) < passwordParam.length()) { decodedPassword += (char)strtol((messageParam.substring(i + 1, i + 3)).c_str(), NULL, 16); i += 2; }
-                else { decodedPassword += passwordParam.charAt(i); }
+              
+              // --- MODIFICATION START: Decode passwordHashParam to decodedPasswordHash ---
+              passwordHashParam.replace('+', ' '); String decodedPasswordHash = "";
+              for (int i = 0; i < passwordHashParam.length(); i++) {
+                if (passwordHashParam.charAt(i) == '%' && (i + 2) < passwordHashParam.length()) { decodedPasswordHash += (char)strtol((passwordHashParam.substring(i + 1, i + 3)).c_str(), NULL, 16); i += 2; }
+                else { decodedPasswordHash += passwordHashParam.charAt(i); }
               }
+              // --- MODIFICATION END ---
+
               newPasswordParam.replace('+', ' '); String decodedNewPassword = "";
               for (int i = 0; i < newPasswordParam.length(); i++) {
-                if (newPasswordParam.charAt(i) == '%' && (i + 2) < newPasswordParam.length()) { decodedNewPassword += (char)strtol((messageParam.substring(i + 1, i + 3)).c_str(), NULL, 16); i += 2; }
+                if (newPasswordParam.charAt(i) == '%' && (i + 2) < newPasswordParam.length()) { decodedNewPassword += (char)strtol((newPasswordParam.substring(i + 1, i + 3)).c_str(), NULL, 16); i += 2; }
                 else { decodedNewPassword += newPasswordParam.charAt(i); }
               }
               confirmNewPasswordParam.replace('+', ' '); String decodedConfirmNewPassword = "";
               for (int i = 0; i < confirmNewPasswordParam.length(); i++) {
-                if (confirmNewPasswordParam.charAt(i) == '%' && (i + 2) < confirmNewPasswordParam.length()) { decodedConfirmNewPassword += (char)strtol((messageParam.substring(i + 1, i + 3)).c_str(), NULL, 16); i += 2; }
+                if (confirmNewPasswordParam.charAt(i) == '%' && (i + 2) < confirmNewPasswordParam.length()) { decodedConfirmNewPassword += (char)strtol((confirmNewPasswordParam.substring(i + 1, i + 3)).c_str(), NULL, 16); i += 2; }
                 else { decodedConfirmNewPassword += confirmNewPasswordParam.charAt(i); }
               }
 
@@ -1627,12 +1632,15 @@ void loop() {
                   if (lockoutTime > 0 && millis() < lockoutTime) { webFeedbackMessage = "<p class='feedback' style='color:red;'>Too many failed attempts. Try again later.</p>"; }
                   else {
                       if (lockoutTime > 0 && millis() >= lockoutTime) { lockoutTime = 0; loginAttempts = 0; }
-                      String receivedPasswordHash = simpleHash(decodedPassword);
+                      
+                      // --- MODIFICATION START: Compare hash from client directly ---
+                      // String receivedPasswordHash = simpleHash(decodedPassword); // OLD line
                       if(VERBOSE_MODE) {
                           Serial.print("Current hashedOrganizerPassword (for login): '"); Serial.print(hashedOrganizerPassword); Serial.println("'");
-                          Serial.print("Received Password Hash (after hashing plaintext): '"); Serial.print(receivedPasswordHash); Serial.println("'");
+                          Serial.print("Received Password Hash (from client): '"); Serial.print(decodedPasswordHash); Serial.println("'"); // MODIFIED
                       }
-                      if (receivedPasswordHash.equalsIgnoreCase(hashedOrganizerPassword)) {
+                      if (decodedPasswordHash.equalsIgnoreCase(hashedOrganizerPassword)) { // MODIFIED
+                      // --- MODIFICATION END ---
                           loginAttempts = 0;
                           organizerSessionToken = String(esp_random()) + String(esp_random());
                           sessionTokenTimestamp = millis();
@@ -1717,25 +1725,24 @@ void loop() {
                       } else if (decodedNewPassword != decodedConfirmNewPassword) {
                           webFeedbackMessage = "<p class='feedback' style='color:red;'>New passwords do not match. Please try again.</p>";
                       } else {
-                          // --- START: MODIFICATION (Logic from new 3.txt) ---
-                          // 1. Set the hash for web login (simple hash)
-                          hashedOrganizerPassword = simpleHash(decodedNewPassword);
-                          passwordChangeLocked = true;
-                          
-                          // 2. Set the key for mesh encryption (stretched key)
+                          // The action depends on the mode detected at boot.
                           if (isUsingDefaultPsk) {
-                              // Compatibility Mode: Derive the stretched session key
+                              // Compatibility Mode: Derive a new key and broadcast it.
                               if(VERBOSE_MODE) Serial.println("Setting password in Compatibility Mode. Deriving and broadcasting new session key.");
                               deriveAndSetSessionKey(decodedNewPassword);
+                              createAndSendMessage(decodedNewPassword.c_str(), decodedNewPassword.length(), MSG_TYPE_PASSWORD_UPDATE);
                           } else {
-                              // Secure Flash Mode: Only update web UI hash.
-                              if(VERBOSE_MODE) Serial.println("Setting password in Secure Flash Mode. Web UI hash updated only.");
+    // Secure Flash Mode: Only update the web UI login password. Do NOT change the mesh key.
+    if(VERBOSE_MODE) Serial.println("Setting password in Secure Mode. Updating web UI login hash only.");
+    hashedOrganizerPassword = simpleHash(decodedNewPassword);
+    passwordChangeLocked = true; // Lock from further changes.
+
+    // Broadcast the new organizer password so other secure nodes update their web-login too.
+    // MSG_TYPE_PASSWORD_UPDATE messages are encrypted with the flashed PSK (PRE_SHARED_KEY+4),
+    // so plaintext here is transported safely to other nodes sharing the same flashed key.
+    createAndSendMessage(decodedNewPassword.c_str(), decodedNewPassword.length(), MSG_TYPE_PASSWORD_UPDATE);
+
                           }
-                      
-                          // 3. Broadcast the new organizer password
-                          createAndSendMessage(decodedNewPassword.c_str(), decodedNewPassword.length(), MSG_TYPE_PASSWORD_UPDATE);
-                          // --- END: MODIFICATION ---
-                          
                           webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer password updated successfully!</p>";
                           loginAttempts = 0;
                           lockoutTime = 0;
@@ -1807,10 +1814,34 @@ void loop() {
             client.println(F(".recent-senders-display-wrapper{display:flex;flex-direction:column;align-items:center;width:100%;max-width:450px;background:#e6f7ff;border:1px solid #cceeff;border-radius:12px;padding:10px 15px;font-size:0.75em;color:#0056b3;margin:15px auto; box-sizing: border-box;}"));
             client.println(F(".detected-nodes-label{font-weight:bold;margin-bottom:5px;color:#003366;}"));
             client.println(F(".detected-nodes-mac-list{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;width:100%;}"));
-            client.println(F("</style></head><body><script>"));
+            client.println(F("</style>"));
+            
+            // --- MODIFICATION START: Added crypto-js and hashing function (MOVED TO <HEAD> and FIXED) ---
+            client.println(F("<script src=\"https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js\"></script>"));
+            client.println(F("<script>"));
             client.println(F("document.addEventListener('DOMContentLoaded', () => { const preElement = document.querySelector('pre'); if (preElement) { preElement.scrollTop = 0; } });"));
+            client.println(F("function hashAndSubmitPassword(form) {"));
+            client.println(F("  try {"));
+            client.println(F("    const plainInput = form.querySelector('input[name=\"password_plaintext_client\"]');")); // <-- FIX: Matched originalcode
+            client.println(F("    const hashInput = form.querySelector('input[name=\"password_hash_client\"]');"));
+            client.println(F("    if (plainInput && hashInput) {"));
+            client.println(F("      const plainPassword = plainInput.value;"));
+            client.println(F("      const pseudoSalt = 'ProtestNodeSalt123XYZ';")); // Must match simpleHash() in C++
+            client.println(F("      const saltedPassword = plainPassword + pseudoSalt;"));
+            client.println(F("      const hashedPassword = CryptoJS.SHA256(saltedPassword).toString(CryptoJS.enc.Hex);"));
+            client.println(F("      hashInput.value = hashedPassword;"));
+            client.println(F("      plainInput.value = '';")); // Clear plaintext before submit
+            client.println(F("      return true;")); // Proceed with submission
+            client.println(F("    }"));
+            client.println(F("  } catch (e) { console.error('Password hashing failed:', e); }"));
+            client.println(F("  return false;")); // Block submission on error
+            client.println(F("}"));
             client.println(F("</script>"));
-            client.println(F("<body><header><h1>Protest Information Node</h1>"));
+            // --- MODIFICATION END ---
+            
+            client.println(F("</head>")); // <-- FIX: Correctly close <head>
+            
+            client.println(F("<body><header><h1>Protest Information Node</h1>")); // <-- FIX: Correctly open <body>
             client.printf("<p class='info-line'><strong>IP:</strong> %s | <strong>MAC:</strong> %s</p>", IP.toString().c_str(), MAC_suffix_str.c_str());
             client.println(F("<p style='font-weight:bold; color:#007bff; margin-top:10px;'>All protest activities are non-violent. Please remain calm, even if others are not.</p>"));
             if (publicMessagingEnabled) { client.println(F("<p class='feedback' style='color:orange;'>Warning: Public messages are unmoderated.</p>")); }
@@ -1969,7 +2000,7 @@ void loop() {
 
                 client.println(F("<form action='/' method='POST' style='margin-top:10px;'><input type='hidden' name='action' value='exitOrganizer'>"));
                 client.printf("<input type='hidden' name='session_token' value='%s'>", sessionTokenParam.c_str());
-                if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
+                if (showPublicView) client.println(F("<input type'hidden' name='show_public' value='true'>"));
                 if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
                 if (hideSystemView) client.println(F("<input type='hidden' name='hide_system' value='true'>"));
                 client.println(F("<input type='submit' value='Exit Organizer Mode' class='button-link secondary' style='background-color:#dc3545; width: auto;'></form>"));
@@ -1991,13 +2022,15 @@ void loop() {
                     }
                     client.println(F("</div></details>"));
                 } else {
-                    // If password IS set, then show the standard login form.
+                    // --- MODIFICATION START: Add onsubmit, change input names, add hidden hash field ---
                     client.println(F("<details><summary>Enter Organizer Mode</summary><div class='form-container' style='box-shadow:none;border:none;padding-top:5px;'>"));
-                    client.println(F("<form action='/' method='POST'><input type='hidden' name='action' value='enterOrganizer'>"));
+                    client.println(F("<form action='/' method='POST' onsubmit='return hashAndSubmitPassword(this);'><input type='hidden' name='action' value='enterOrganizer'>"));
                     if (showPublicView) client.println(F("<input type='hidden' name='show_public' value='true'>"));
                     if (showUrgentView) client.println(F("<input type='hidden' name='show_urgent' value='true'>"));
-                    client.println(F("<label for='pass_input'>Password:</label><input type='password' id='pass_input' name='password_plaintext_client' required>"));
+                    client.println(F("<label for='pass_input_client'>Password:</label><input type='password' id='pass_input_client' name='password_plaintext_client' required>")); // <-- FIXED
+                    client.println(F("<input type='hidden' name='password_hash_client' value=''>"));
                     client.println(F("<input type='submit' value='Enter Mode' style='width: auto;'></form></div></details>"));
+                    // --- MODIFICATION END ---
                 }
                 if(publicMessagingEnabled && passwordChangeLocked) {
                     client.println(F("<details><summary>Send a Public Message</summary><div class='form-container' style='box-shadow:none;border:none;padding-top:5px;'>"));
@@ -2153,7 +2186,7 @@ void displayStatsInfoMode() {
   tft.printf("  Public Msgs:   %s\n", publicMessagingEnabled ? "ENABLED" : "DISABLED");
   tft.printf("  Public Lock:   %s\n", publicMessagingLocked ? "LOCKED" : "UNLOCKED");
   tft.printf("  Node Capable:  %s\n", passwordChangeLocked ? "YES" : "NO");
-  portENTER_CRITICAL(&apClientsMutex);
+   portENTER_CRITICAL(&apClientsMutex);
   int uniqueClients = apConnectedClients.size();
   portEXIT_CRITICAL(&apClientsMutex);
   tft.println("AP Stats:");
