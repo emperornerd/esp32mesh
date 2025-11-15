@@ -133,4 +133,3 @@ The `flash.html` page provides an *experimental* in-browser secure flash.
 * `index.html`: The project's main landing page.
 * `flash.html`: The web-based flashing tool. Implements the "Experimental Secure" in-browser patching logic.
 * `compile.ps1`: The offline (PowerShell) build script for "Secure Mode". Generates and injects the random key *before* compiling.
-* `Protest Information Node — User Guide` (text): A high-level, *slightly outdated* (e.g., password, message length) user-facing guide. The code (`originalcode.cpp`) is the source of truth.
