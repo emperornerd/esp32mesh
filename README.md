@@ -107,18 +107,9 @@ This method uses the provided build script to create a single, secure, unique fi
 
 ### Option 2: Secure Mode - Experimental Web Flasher
 
-The `flash.html` page provides an *experimental* in-browser secure flash.
+Honestly, this doesn't work. I want it to work, it doesn't. Don't rely on it for now. 
 
-1.  Navigate to `flash.html` in a Web-Serial-compatible browser (Chrome, Edge).
-2.  Go to Advanced Options (Experimental) and click Initialize Experimental Flasher.
-3.  This will:
-    * Generate a random key *in your browser session*.
-    * Fetch the *stock* firmware `.bin`.
-    * Find the `DE AD BE EF` magic bytes and *patch the key* live in the browser's memory.
-4.  Click Flash Experimental Secure Firmware and select your ESP32.
-5.  CRITICAL: You must flash all other nodes in your mesh with this *exact same patched firmware*. Use the Download Patched Secure Firmware button to save the unique `.bin` file and flash it to your other nodes manually.
-
-### Option 3: Compatibility Mode (Testing Only)
+### Option 3: Compatibility Mode (Testing/lower risk only--I did what I can, but it's inherently not secure if at higher risk)
 
 1.  Navigate to `flash.html`.
 2.  Select Compatibility Mode.
