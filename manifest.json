@@ -1,0 +1,31 @@
+{
+
+  "name": "ESP32 Custom Firmware",
+
+  "version": "1.0.0",
+
+  "new_install_prompt_erase": true,
+
+  "builds": [
+
+    {
+
+      "chipFamily": "ESP32",
+
+      "parts": [
+
+        {
+
+          "path": "sketch_nov19a.ino.merged.bin",
+
+          "offset": 0
+
+        }
+
+      ]
+
+    }
+
+  ]
+
+}
