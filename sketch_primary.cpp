@@ -633,9 +633,6 @@ void onDataRecv(const esp_now_recv_info *recvInfo, const uint8_t *data, int len)
 }
 
 void sendToAllPeers(esp_now_message_t& message) {
-  uint8_t currentMacBytes[6];
-  memcpy(currentMacBytes, ourMacBytes, 6);
-
   if (message.ttl > 0) {
       message.ttl--; // Decrement TTL for this hop
   } else {
@@ -643,20 +640,12 @@ void sendToAllPeers(esp_now_message_t& message) {
       return;
   }
 
-  portENTER_CRITICAL(&espNowAddedPeersMutex);
-  for (auto const& [macStr, timestamp] : espNowAddedPeers) {
-    uint8_t peerMacBytes[6];
-    unsigned int tempMac[6];
-    sscanf(macStr.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X",
-           &tempMac[0], &tempMac[1], &tempMac[2], &tempMac[3], &tempMac[4], &tempMac[5]);
-    for (int k = 0; k < 6; ++k) { peerMacBytes[k] = (uint8_t)tempMac[k]; }
-
-    // Only send to peers that are NOT our own MAC and NOT the original sender
-    if (memcmp(peerMacBytes, currentMacBytes, 6) != 0 && memcmp(peerMacBytes, message.originalSenderMac, 6) != 0) {
-      esp_now_send(peerMacBytes, (uint8_t*)&message, sizeof(esp_now_message_t));
-    }
-  }
-  portEXIT_CRITICAL(&espNowAddedPeersMutex);
+  // --- MODIFIED: Send to BROADCAST address (FF:FF:FF:FF:FF:FF) instead of looping ---
+  // This reduces airtime usage (noise) significantly.
+  const uint8_t broadcastAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  esp_now_send(broadcastAddress, (uint8_t*)&message, sizeof(esp_now_message_t));
+  
+  // Removed iteration loop over espNowAddedPeers
 }
 
 void createAndSendMessage(const char* plaintext_data, size_t plaintext_data_len, uint8_t type, const uint8_t* targetMac = nullptr) {
