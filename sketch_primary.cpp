@@ -141,7 +141,7 @@ const unsigned long PROMISCUOUS_SAMPLE_DURATION_MS = 2000;
 volatile long totalRssi = 0;
 volatile int rssiSampleCount = 0;
 
-const int RSSI_JAMMING_THRESHOLD = -65; 
+const int RSSI_JAMMING_THRESHOLD = -54; 
 
 
 
@@ -1120,24 +1120,47 @@ void loop() {
     }
     
     
-    if (incomingMessage.messageType == MSG_TYPE_PASSWORD_UPDATE) {
-        String incomingPass = String(incomingMessage.content);
+if (incomingMessage.messageType == MSG_TYPE_PASSWORD_UPDATE) {
+    String incomingContent = String(incomingMessage.content);
 
+    
+    if (!wasAlreadySeen) {
+        // Check if the message contains a delimiter indicating "HASH|PLAINTEXT" format
+        int delimiterPos = incomingContent.indexOf('|');
         
-        if (!wasAlreadySeen) {
+        if (delimiterPos > 0 && delimiterPos == 64) {
+            // NEW PROTOCOL: "HASH|PLAINTEXT" format
+            String receivedHash = incomingContent.substring(0, 64);
+            String receivedPlaintext = incomingContent.substring(65);
             
-            hashedOrganizerPassword = simpleHash(incomingPass);
-            passwordChangeLocked    = true;
-
+            if(VERBOSE_MODE) {
+                Serial.println("Received password update in HASH|PLAINTEXT format (new protocol)");
+                Serial.printf("Received Hash: '%s'\n", receivedHash.c_str());
+            }
             
+            // Use the hash directly for web login (no re-hashing)
+            hashedOrganizerPassword = receivedHash;
+            passwordChangeLocked = true;
+            
+            // If in Compatibility mode, derive the session key from plaintext
             if (isUsingDefaultPsk) {
-                if(VERBOSE_MODE) Serial.println("Received new password in Compat mode. Deriving new session key.");
-                deriveAndSetSessionKey(incomingPass);
-            } else {
-                if(VERBOSE_MODE) Serial.println("Received new password in Secure mode. Updating web UI hash only.");
+                if(VERBOSE_MODE) Serial.println("Deriving session key from plaintext portion");
+                deriveAndSetSessionKey(receivedPlaintext);
+            }
+            
+        } else {
+            // LEGACY PROTOCOL: Just plaintext (for backward compatibility)
+            if(VERBOSE_MODE) Serial.println("Received password update in plaintext format (legacy protocol)");
+            
+            hashedOrganizerPassword = simpleHash(incomingContent);
+            passwordChangeLocked = true;
+
+            if (isUsingDefaultPsk) {
+                if(VERBOSE_MODE) Serial.println("Deriving session key from plaintext");
+                deriveAndSetSessionKey(incomingContent);
             }
         }
-            
+    }            
         
         
         String newPasswordHash = simpleHash(String(incomingMessage.content));
@@ -1753,73 +1776,96 @@ if (isPost) {
               client.println(F("Pragma: no-cache")); client.println(F("Expires: 0")); client.println(); client.stop(); return;
 } else if (actionParam == "setOrganizerPassword") {
 
-                  if (passwordChangeLocked) {
-                      webFeedbackMessage = "<p class='feedback' style='color:red;'>The organizer password for this node cannot be changed after it has been set. To reset the password, you must reboot the board.</p>";
-                  } else { 
-                      if(VERBOSE_MODE) {
-                          Serial.println("\n--- SET PASSWORD ATTEMPT START ---");
-                          Serial.printf("SET_PASS: Received plaintext: '%s'\n", decodedNewPassword.c_str());
-                      }
+    if (passwordChangeLocked) {
+        webFeedbackMessage = "<p class='feedback' style='color:red;'>The organizer password for this node cannot be changed after it has been set. To reset the password, you must reboot the board.</p>";
+    } else { 
+        if(VERBOSE_MODE) {
+            Serial.println("\n--- SET PASSWORD ATTEMPT START ---");
+            Serial.printf("SET_PASS: Received plaintext: '%s'\n", decodedNewPassword.c_str());
+        }
 
-                      if (decodedNewPassword.length() == 0) {
-                          webFeedbackMessage = "<p class='feedback' style='color:orange;'>New password cannot be empty.</p>";
-                      } else if (decodedNewPassword != decodedConfirmNewPassword) {
-                          webFeedbackMessage = "<p class='feedback' style='color:red;'>New passwords do not match. Please try again.</p>";
-                      } else {
-                          
-                          // 1. Calculate Simple Hash (For Web Login) - USING CLIENT PROVIDED HASH
-                          String correctWebHash = decodedNewPasswordHash;
-                          if (correctWebHash.length() == 0) {
-                             // Fallback only if client JS failed completely
-                             if(VERBOSE_MODE) Serial.println("SET_PASS WARNING: Client did not send hash! Falling back to server-side calc (might be flaky).");
-                             correctWebHash = simpleHash(decodedNewPassword);
-                          }
+        if (decodedNewPassword.length() == 0) {
+            webFeedbackMessage = "<p class='feedback' style='color:orange;'>New password cannot be empty.</p>";
+        } else if (decodedNewPassword != decodedConfirmNewPassword) {
+            webFeedbackMessage = "<p class='feedback' style='color:red;'>New passwords do not match. Please try again.</p>";
+        } else {
+            
+            // 1. Calculate Simple Hash (For Web Login) - USING CLIENT PROVIDED HASH
+            String correctWebHash = decodedNewPasswordHash;
+            if (correctWebHash.length() == 0) {
+                // Fallback only if client JS failed completely
+                if(VERBOSE_MODE) Serial.println("SET_PASS WARNING: Client did not send hash! Falling back to server-side calc (might be flaky).");
+                correctWebHash = simpleHash(decodedNewPassword);
+            }
 
-                          if(VERBOSE_MODE) Serial.printf("SET_PASS DEBUG: Using Client-Provided Hash (for Web Login): '%s'\n", correctWebHash.c_str());
+            if(VERBOSE_MODE) Serial.printf("SET_PASS DEBUG: Using Client-Provided Hash (for Web Login): '%s'\n", correctWebHash.c_str());
 
-                          if (isUsingDefaultPsk) {
-                              if(VERBOSE_MODE) Serial.println("SET_PASS: Mode is Compatibility.");
-                              
-                              // 2. Derive Stretched Key (For Mesh Encryption) - STILL USING PLAINTEXT
-                              deriveAndSetSessionKey(decodedNewPassword);
-                              
-                              // Capture the result of the derivation for logging
-                              String generatedSessionKeyHex = "";
-                              for(int k=0; k<16; k++) { char hexBuf[3]; sprintf(hexBuf, "%02X", sessionKey[k]); generatedSessionKeyHex += hexBuf; }
-                              if(VERBOSE_MODE) Serial.printf("SET_PASS DEBUG: Derived Stretched Key (for Mesh):      '%s'\n", generatedSessionKeyHex.c_str());
+            if (isUsingDefaultPsk) {
+                if(VERBOSE_MODE) Serial.println("SET_PASS: Mode is Compatibility.");
+                
+                // 2. Derive Stretched Key (For Mesh Encryption) - STILL USING PLAINTEXT
+                deriveAndSetSessionKey(decodedNewPassword);
+                
+                // Capture the result of the derivation for logging
+                String generatedSessionKeyHex = "";
+                for(int k=0; k<16; k++) { char hexBuf[3]; sprintf(hexBuf, "%02X", sessionKey[k]); generatedSessionKeyHex += hexBuf; }
+                if(VERBOSE_MODE) Serial.printf("SET_PASS DEBUG: Derived Stretched Key (for Mesh):      '%s'\n", generatedSessionKeyHex.c_str());
 
-                              // 3. Assign Web Hash to Global Variable
-                              hashedOrganizerPassword = correctWebHash;
-                              
-                              // 4. Verify what was actually stored
-                              if(VERBOSE_MODE) {
-                                  Serial.printf("SET_PASS DEBUG: FINAL CHECK [hashedOrganizerPassword] is now: '%s'\n", hashedOrganizerPassword.c_str());
-                                  if (hashedOrganizerPassword != correctWebHash) Serial.println("SET_PASS DEBUG: ERROR! Assignment failed or value corrupted!");
-                              }
-                              
-                              createAndSendMessage(decodedNewPassword.c_str(), decodedNewPassword.length(), MSG_TYPE_PASSWORD_UPDATE);
-                          } else {
-                              if(VERBOSE_MODE) Serial.println("SET_PASS: Mode is Secure.");
-                              
-                              hashedOrganizerPassword = correctWebHash;
+                // 3. Assign Web Hash to Global Variable
+                hashedOrganizerPassword = correctWebHash;
+                
+                // 4. Verify what was actually stored
+                if(VERBOSE_MODE) {
+                    Serial.printf("SET_PASS DEBUG: FINAL CHECK [hashedOrganizerPassword] is now: '%s'\n", hashedOrganizerPassword.c_str());
+                    if (hashedOrganizerPassword != correctWebHash) Serial.println("SET_PASS DEBUG: ERROR! Assignment failed or value corrupted!");
+                }
+                
+                // *** FIX: Broadcast "HASH|PLAINTEXT" so receivers get both ***
+                String broadcastPayload = correctWebHash + "|" + decodedNewPassword;
+                createAndSendMessage(broadcastPayload.c_str(), broadcastPayload.length(), MSG_TYPE_PASSWORD_UPDATE);
+                
+                if(VERBOSE_MODE) {
+                    Serial.printf("SET_PASS DEBUG: Broadcasting HASH|PLAINTEXT to mesh (length: %d)\n", broadcastPayload.length());
+                }
+            } else {
+                if(VERBOSE_MODE) Serial.println("SET_PASS: Mode is Secure.");
+                
+                hashedOrganizerPassword = correctWebHash;
 
-                              if(VERBOSE_MODE) {
-                                  Serial.printf("SET_PASS DEBUG: FINAL CHECK [hashedOrganizerPassword] is now: '%s'\n", hashedOrganizerPassword.c_str());
-                              }
+                if(VERBOSE_MODE) {
+                    Serial.printf("SET_PASS DEBUG: FINAL CHECK [hashedOrganizerPassword] is now: '%s'\n", hashedOrganizerPassword.c_str());
+                }
 
-                              createAndSendMessage(decodedNewPassword.c_str(), decodedNewPassword.length(), MSG_TYPE_PASSWORD_UPDATE);
-                          }
+                // *** FIX: Broadcast "HASH|PLAINTEXT" for consistency ***
+                String broadcastPayload = correctWebHash + "|" + decodedNewPassword;
+                createAndSendMessage(broadcastPayload.c_str(), broadcastPayload.length(), MSG_TYPE_PASSWORD_UPDATE);
+                
+                if(VERBOSE_MODE) {
+                    Serial.printf("SET_PASS DEBUG: Broadcasting HASH|PLAINTEXT to mesh (length: %d)\n", broadcastPayload.length());
+                }
+            }
 
-                          if(VERBOSE_MODE) Serial.println("--- SET PASSWORD ATTEMPT END ---\n");
+            if(VERBOSE_MODE) Serial.println("--- SET PASSWORD ATTEMPT END ---\n");
 
-                          // Lock changes after setting
-                          passwordChangeLocked = true;
-                          webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer password updated successfully!</p>";
-                          loginAttempts = 0;
-                          lockoutTime = 0;
-                      }
-                  }
-              }
+            // Lock changes after setting
+            passwordChangeLocked = true;
+            webFeedbackMessage = "<p class='feedback' style='color:green;'>Organizer password updated successfully!</p>";
+            loginAttempts = 0;
+            lockoutTime = 0;
+        }
+    }
+
+    client.println(F("HTTP/1.1 303 See Other"));
+    String redirectQuery = currentQueryParams;
+    if (isOrganizerSessionActive && sessionTokenParam.length() > 0) {
+        if (redirectQuery.length() > 0) redirectQuery += "&";
+        redirectQuery += "session_token=" + sessionTokenParam;
+    }
+    client.println("Location: /?" + redirectQuery);
+    client.println(F("Connection: close")); client.println(F("Cache-Control: no-cache, no-store, must-revalidate"));
+    client.println(F("Pragma: no-cache")); client.println(F("Expires: 0")); client.println(); client.stop(); return;
+
+}
             }
             String detectedNodesHtmlContent = "<div class='recent-senders-display-wrapper'><span class='detected-nodes-label'>Senders:</span><div class='detected-nodes-mac-list'>";
             int count = 0;
