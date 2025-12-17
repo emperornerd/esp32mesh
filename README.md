@@ -1,5 +1,7 @@
 # ESP32 Protest Communication Mesh
 
+* The python build/install script is not as well tested as the Windows one. Use Windows when you can until I can better test other platforms. The thinking is that most users that aren't developers will be on Windows, so I built that out first and foremost. The Python script does also work on Windows, but native tools are suggested, typically *
+
 This is a decentralized, off-grid communication network designed for resilient public broadcasting during protests or events where centralized networks are unavailable or suppressed. It uses a mesh of low-cost ESP32 devices. Each node functions simultaneously as an ESP-NOW mesh relay and a Wi-Fi Access Point.
 
 Users connect to the node's Wi-Fi with their phone (no app required) and are directed to a captive portal. This web interface allows them to read a real-time log of public messages and, if enabled, post their own.
